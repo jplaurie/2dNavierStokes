@@ -1,9 +1,9 @@
 OBJS = main.o linear.o nonlinear.o read.o conservation_laws.o flux.o spectrum.o initialise_forcing.o 
 
 #this is for linux machines
-CC = g++ -Wall -O3 -std=c++14 -fopenmp
-CFLAGS = -c -I/usr/local/include
-LFLAGS = $(DEBUG) -lfftw3 -lfftw3_threads -lopenblas -L/usr/local/lib -lm -lpthread -llapack -larmadillo
+#CC = g++ -Wall -O3 -std=c++14 -fopenmp
+#CFLAGS = -c -I/usr/local/include
+#LFLAGS = $(DEBUG) -lfftw3 -lfftw3_threads -lopenblas -L/usr/local/lib -lm -lpthread -llapack -larmadillo
 
 #this is for aston math cluster
 #CC = g++ -Wall -O3 -std=c++14 -fopenmp
@@ -12,7 +12,7 @@ LFLAGS = $(DEBUG) -lfftw3 -lfftw3_threads -lopenblas -L/usr/local/lib -lm -lpthr
 
 
 #the following is for macports in mac osx
-CC = g++-mp-10 -Wall -O3 -std=c++14 -fopenmp
+CC = g++-mp-12 -Wall -O3 -std=c++14 -fopenmp
 DEBUG = 
 CFLAGS = -c $(DEBUG) -I/opt/local/include
 LFLAGS =  $(DEBUG) -L/opt/local/lib -framework Accelerate -march=native -lfftw3 -lfftw3_threads -lopenblas -lm -lpthread -larmadillo

@@ -2,9 +2,10 @@
 
 Numerical code for 2d Navier Stokes Equations
 
-$$\frac{\partial \omega}{\pasrtial t} = -(\mathbf{v}\cdot \namba)\omega - \mu (-\Delta)^p \omega - \alpha\omega  + F$$
-
-**Parameters:** Hyperviscosity $\nu$, linear friction $\alpha$.
+```math
+\frac{\partial \omega}{\partial t} = -(\mathbf{v}\cdot \nabla)\omega - \nu (-\Delta)^p \omega - \alpha (-\Delta)^{-q} \omega  + F
+```
+**Parameters:** Hyperviscosity $`\nu`$, linear friction $`\alpha`$.
 
 **Boundary Conditions:** Periodic boundary conditions.
 

@@ -1,0 +1,29 @@
+# Small deterministic installation and backend-comparison run.
+nx 32
+ny 32
+aspectRatio 1
+timeStep 0.001
+numberOfSteps 10
+outputIntervalSteps 5
+
+integrator etd4
+betaPlane false
+viscosity 1e-5
+viscosityOrder 2
+linearDrag 1e-3
+dragOrder 0
+
+forcingEnabled true
+forcingProfile annulus
+forcingWavenumber 6
+forcingWidth 0.75
+forcingAmplitude 0.02
+forcingShapeOrder 4
+targetEnergyInjectionRate 0
+randomSeed 123456
+
+writeModeDiagnostics true
+threadCount 1
+overwriteOutput false
+dataDirectory data/quickstart_modern
+outputDirectory output/quickstart_modern

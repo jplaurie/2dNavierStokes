@@ -1,0 +1,223 @@
+set(executable "@CMAKE_CURRENT_BINARY_DIR@/navier_stokes_cpu")
+set(run_root "@NS2D_SMOKE_DIR@")
+file(REMOVE_RECURSE "${run_root}")
+file(MAKE_DIRECTORY "${run_root}")
+
+function(run_solver directory)
+  execute_process(
+    COMMAND "${executable}" run.params
+    WORKING_DIRECTORY "${directory}"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "solver failed in ${directory}:\n${stdout}\n${stderr}")
+  endif()
+endfunction()
+
+function(expect_solver_failure directory expected_error)
+  execute_process(
+    COMMAND "${executable}" run.params
+    WORKING_DIRECTORY "${directory}"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr)
+  if(result EQUAL 0 OR NOT stderr MATCHES "${expected_error}")
+    message(FATAL_ERROR
+            "solver did not report '${expected_error}' in ${directory}:\n${stdout}\n${stderr}")
+  endif()
+endfunction()
+
+set(basic "${run_root}/basic")
+file(MAKE_DIRECTORY "${basic}")
+file(WRITE "${basic}/run.params" [=[
+nx 8
+ny 8
+timeStep 0.001
+numberOfSteps 2
+outputIntervalSteps 1
+integrator etd4
+forcingEnabled false
+viscosity 0.001
+viscosityOrder 1
+linearDrag 0
+threadCount 1
+randomSeed 1234
+dataDirectory data
+outputDirectory output
+]=])
+run_solver("${basic}")
+foreach(path data/vorticity_00000000.dat data/vorticity_00000001.dat
+             data/vorticity_00000002.dat data/restart_state.txt
+             data/checkpoint_00000000.bin data/checkpoint_00000002.bin
+             output/diagnostics.csv output/spectra.csv output/fluxes.csv
+             output/forcing_summary.csv output/forcing_spectrum.csv
+             output/resolved_parameters.txt)
+  if(NOT EXISTS "${basic}/${path}")
+    message(FATAL_ERROR "missing expected output: ${path}")
+  endif()
+endforeach()
+file(READ "${basic}/output/diagnostics.csv" diagnostics)
+if(NOT diagnostics MATCHES "time,frame,energy,enstrophy")
+  message(FATAL_ERROR "diagnostics.csv has no documented header")
+endif()
+
+# Exercise all integrators, both stochastic profiles, deterministic single-mode
+# forcing, beta-plane dynamics, a rectangular grid, and threaded FFTW/OpenMP.
+foreach(case IN ITEMS etd2 etd3 rk2 exponential singleMode singleModeRk2
+                      betaPlane)
+  set(case_dir "${run_root}/${case}")
+  file(MAKE_DIRECTORY "${case_dir}")
+  set(integrator "${case}")
+  if(case STREQUAL "exponential" OR case STREQUAL "singleMode" OR
+     case STREQUAL "betaPlane")
+    set(integrator etd4)
+  elseif(case STREQUAL "singleModeRk2")
+    set(integrator rk2)
+  endif()
+  set(profile annulus)
+  if(case STREQUAL "exponential")
+    set(profile exponential)
+  elseif(case STREQUAL "singleMode" OR case STREQUAL "singleModeRk2")
+    set(profile singleMode)
+  endif()
+  set(nx 8)
+  set(ny 8)
+  set(aspect 1)
+  set(beta false)
+  set(viscosity 1e-5)
+  set(linear_drag 1e-3)
+  if(case STREQUAL "singleMode" OR case STREQUAL "singleModeRk2")
+    set(viscosity 0)
+    set(linear_drag 0)
+  endif()
+  if(case STREQUAL "betaPlane")
+    set(nx 8)
+    set(ny 12)
+    set(aspect 2)
+    set(beta true)
+  endif()
+  file(WRITE "${case_dir}/run.params"
+"nx ${nx}\nny ${ny}\naspectRatio ${aspect}\ntimeStep 0.0001\n"
+"numberOfSteps 2\noutputIntervalSteps 2\nintegrator ${integrator}\n"
+"betaPlane ${beta}\nbeta 3\nviscosity ${viscosity}\nviscosityOrder 2\nlinearDrag ${linear_drag}\n"
+"forcingEnabled true\nforcingProfile ${profile}\nforcingWavenumber 2\nforcingWidth 0.6\n"
+"forcingAmplitude 0.01\nforcingShapeOrder 4\nrandomSeed 77\nthreadCount 2\n"
+"dataDirectory data\noutputDirectory output\n")
+  run_solver("${case_dir}")
+  file(READ "${case_dir}/output/diagnostics.csv" values)
+  if(values MATCHES "[Nn][Aa][Nn]" OR values MATCHES "[Ii][Nn][Ff]")
+    message(FATAL_ERROR "${case} produced a non-finite diagnostic: ${values}")
+  endif()
+endforeach()
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E compare_files
+          "${run_root}/singleMode/data/vorticity_00000001.dat"
+          "${run_root}/singleModeRk2/data/vorticity_00000001.dat"
+  RESULT_VARIABLE deterministic_comparison)
+if(NOT deterministic_comparison EQUAL 0)
+  message(FATAL_ERROR
+          "deterministic single-mode forcing differs between ETD4 and RK2")
+endif()
+
+# Exercise threaded FFTW/OpenMP backend paths and verify that thread count does
+# not change scalar diagnostics at the documented output precision.
+foreach(threads IN ITEMS 1 4)
+  set(case_dir "${run_root}/threads_${threads}")
+  file(MAKE_DIRECTORY "${case_dir}")
+  file(WRITE "${case_dir}/run.params"
+"nx 128\nny 128\ntimeStep 0.0001\nnumberOfSteps 2\noutputIntervalSteps 2\n"
+"integrator etd4\nviscosity 1e-7\nviscosityOrder 2\nlinearDrag 1e-3\n"
+"forcingEnabled true\nforcingProfile annulus\nforcingWavenumber 20\nforcingWidth 0.6\n"
+"forcingAmplitude 0.01\nrandomSeed 441\nthreadCount ${threads}\n"
+"dataDirectory data\noutputDirectory output\n")
+  run_solver("${case_dir}")
+endforeach()
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E compare_files
+          "${run_root}/threads_1/output/diagnostics.csv"
+          "${run_root}/threads_4/output/diagnostics.csv"
+  RESULT_VARIABLE threaded_comparison)
+if(NOT threaded_comparison EQUAL 0)
+  message(FATAL_ERROR "OpenMP thread count changed diagnostics at output precision")
+endif()
+
+# A stochastic run split across a restart must match one uninterrupted run for
+# both ETD and integrating-factor time stepping.
+foreach(method IN ITEMS etd4 rk2)
+  foreach(kind IN ITEMS full split)
+    set(case_dir "${run_root}/restart_${method}_${kind}")
+    file(MAKE_DIRECTORY "${case_dir}")
+    if(kind STREQUAL "full")
+      set(step_count 4)
+    else()
+      set(step_count 2)
+    endif()
+    file(WRITE "${case_dir}/run.params"
+"nx 8\nny 8\ntimeStep 0.0001\nnumberOfSteps ${step_count}\noutputIntervalSteps 2\n"
+"integrator ${method}\nviscosity 1e-5\nviscosityOrder 2\nlinearDrag 1e-3\n"
+"forcingEnabled true\nforcingProfile annulus\nforcingWavenumber 2\nforcingWidth 0.6\n"
+"forcingAmplitude 0.01\nrandomSeed 991\nthreadCount 1\n"
+"dataDirectory data\noutputDirectory output\n")
+    run_solver("${case_dir}")
+    if(kind STREQUAL "split")
+      run_solver("${case_dir}")
+    endif()
+  endforeach()
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E compare_files
+            "${run_root}/restart_${method}_full/data/vorticity_00000002.dat"
+            "${run_root}/restart_${method}_split/data/vorticity_00000002.dat"
+    RESULT_VARIABLE comparison)
+  if(NOT comparison EQUAL 0)
+    message(FATAL_ERROR
+            "${method} stochastic restart differs from uninterrupted run")
+  endif()
+endforeach()
+
+# Extreme but syntactically valid inputs must fail during setup instead of
+# silently introducing infinities or NaNs into a trajectory.
+set(nonfinite "${run_root}/nonfinite_operator")
+file(MAKE_DIRECTORY "${nonfinite}")
+file(WRITE "${nonfinite}/run.params" [=[
+nx 8
+ny 8
+timeStep 0.001
+numberOfSteps 1
+outputIntervalSteps 1
+integrator etd4
+viscosity 1e308
+viscosityOrder 8
+forcingEnabled false
+threadCount 1
+dataDirectory data
+outputDirectory output
+]=])
+expect_solver_failure("${nonfinite}" "non-finite coefficient")
+
+set(negative_unsigned "${run_root}/negative_unsigned")
+file(MAKE_DIRECTORY "${negative_unsigned}")
+file(WRITE "${negative_unsigned}/run.params" [=[
+nx 8
+ny 8
+numberOfSteps -1
+forcingEnabled false
+dataDirectory data
+outputDirectory output
+]=])
+expect_solver_failure("${negative_unsigned}" "numberOfSteps cannot be negative")
+
+set(oversized_mode "${run_root}/oversized_mode")
+file(MAKE_DIRECTORY "${oversized_mode}")
+file(WRITE "${oversized_mode}/run.params" [=[
+nx 8
+ny 8
+numberOfSteps 1
+forcingEnabled true
+forcingProfile singleMode
+forcingWavenumber 1e300
+dataDirectory data
+outputDirectory output
+]=])
+expect_solver_failure("${oversized_mode}"
+                      "singleMode forcingWavenumber must lie below")

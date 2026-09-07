@@ -217,10 +217,7 @@ examples/
   quickstart.params           small reproducible example
 tests/
   numerics.cpp                numerical unit tests
-  regression.py               output, restart, and backend regression tests
-archived/
-  legacy_src/                 original serial implementation
-  legacy_src_cuda/            original CUDA source tree
+  regression.py               output, restart, and backend regression testse
 ```
 
 The `Solver` owns the shared simulation state and delegates only nonlinear

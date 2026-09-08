@@ -128,53 +128,56 @@ Parameters readParameters(const std::filesystem::path &path) {
     if (key.empty() || value.empty() || (fields >> extra))
       throw std::runtime_error("invalid parameter line " +
                                std::to_string(lineNumber));
+    const auto readNumber = [&]<class T>(T &destination) {
+      destination = parseNumber<T>(value, key);
+    };
 
     if (key == "nx")
-      p.nx = parseNumber<std::size_t>(value, key);
+      readNumber(p.nx);
     else if (key == "ny")
-      p.ny = parseNumber<std::size_t>(value, key);
+      readNumber(p.ny);
     else if (key == "aspectRatio")
-      p.aspectRatio = parseNumber<double>(value, key);
+      readNumber(p.aspectRatio);
     else if (key == "timeStep")
-      p.timeStep = parseNumber<double>(value, key);
+      readNumber(p.timeStep);
     else if (key == "numberOfSteps")
-      p.numberOfSteps = parseNumber<std::uint64_t>(value, key);
+      readNumber(p.numberOfSteps);
     else if (key == "outputIntervalSteps")
-      p.outputIntervalSteps = parseNumber<std::uint64_t>(value, key);
+      readNumber(p.outputIntervalSteps);
     else if (key == "integrator")
       p.integrator = parseIntegrator(value);
     else if (key == "betaPlane")
       p.betaPlane = parseBool(value, key);
     else if (key == "beta")
-      p.beta = parseNumber<double>(value, key);
+      readNumber(p.beta);
     else if (key == "viscosity")
-      p.viscosity = parseNumber<double>(value, key);
+      readNumber(p.viscosity);
     else if (key == "viscosityOrder")
-      p.viscosityOrder = parseNumber<double>(value, key);
+      readNumber(p.viscosityOrder);
     else if (key == "linearDrag")
-      p.linearDrag = parseNumber<double>(value, key);
+      readNumber(p.linearDrag);
     else if (key == "dragOrder")
-      p.dragOrder = parseNumber<double>(value, key);
+      readNumber(p.dragOrder);
     else if (key == "forcingEnabled")
       p.forcingEnabled = parseBool(value, key);
     else if (key == "forcingProfile")
       p.forcingProfile = parseForcingProfile(value);
     else if (key == "forcingWavenumber")
-      p.forcingWavenumber = parseNumber<double>(value, key);
+      readNumber(p.forcingWavenumber);
     else if (key == "forcingWidth")
-      p.forcingWidth = parseNumber<double>(value, key);
+      readNumber(p.forcingWidth);
     else if (key == "forcingAmplitude")
-      p.forcingAmplitude = parseNumber<double>(value, key);
+      readNumber(p.forcingAmplitude);
     else if (key == "forcingShapeOrder")
-      p.forcingShapeOrder = parseNumber<double>(value, key);
+      readNumber(p.forcingShapeOrder);
     else if (key == "targetEnergyInjectionRate")
-      p.targetEnergyInjectionRate = parseNumber<double>(value, key);
+      readNumber(p.targetEnergyInjectionRate);
     else if (key == "randomSeed")
-      p.randomSeed = parseNumber<std::uint64_t>(value, key);
+      readNumber(p.randomSeed);
     else if (key == "writeModeDiagnostics")
       p.writeModeDiagnostics = parseBool(value, key);
     else if (key == "threadCount")
-      p.threadCount = parseNumber<int>(value, key);
+      readNumber(p.threadCount);
     else if (key == "overwriteOutput")
       p.overwriteOutput = parseBool(value, key);
     else if (key == "initialConditionFile")
@@ -267,37 +270,40 @@ void writeParameterRecord(const Parameters &p, const std::string &backend,
   std::ofstream out(path);
   if (!out)
     throw std::runtime_error("cannot write parameter record: " + path.string());
-  out << std::boolalpha << std::setprecision(17) << "backend " << backend
-      << '\n'
-      << "nx " << p.nx << '\n'
-      << "ny " << p.ny << '\n'
-      << "aspectRatio " << p.aspectRatio << '\n'
-      << "domainLengthX " << p.lx() << '\n'
-      << "domainLengthY " << p.ly() << '\n'
-      << "timeStep " << p.timeStep << '\n'
-      << "numberOfSteps " << p.numberOfSteps << '\n'
-      << "outputIntervalSteps " << p.outputIntervalSteps << '\n'
-      << "integrator " << integratorName(p.integrator) << '\n'
-      << "betaPlane " << p.betaPlane << '\n'
-      << "beta " << p.beta << '\n'
-      << "viscosity " << p.viscosity << '\n'
-      << "viscosityOrder " << p.viscosityOrder << '\n'
-      << "linearDrag " << p.linearDrag << '\n'
-      << "dragOrder " << p.dragOrder << '\n'
-      << "forcingEnabled " << p.forcingEnabled << '\n'
-      << "forcingProfile " << forcingProfileName(p.forcingProfile) << '\n'
-      << "forcingWavenumber " << p.forcingWavenumber << '\n'
-      << "forcingWidth " << p.forcingWidth << '\n'
-      << "forcingAmplitude " << p.forcingAmplitude << '\n'
-      << "forcingShapeOrder " << p.forcingShapeOrder << '\n'
-      << "targetEnergyInjectionRate " << p.targetEnergyInjectionRate << '\n'
-      << "randomSeed " << p.randomSeed << '\n'
-      << "writeModeDiagnostics " << p.writeModeDiagnostics << '\n'
-      << "threadCount " << p.threadCount << '\n'
-      << "overwriteOutput " << p.overwriteOutput << '\n'
-      << "initialConditionFile " << p.initialConditionFile.string() << '\n'
-      << "dataDirectory " << p.dataDirectory.string() << '\n'
-      << "outputDirectory " << p.outputDirectory.string() << '\n';
+  out << std::boolalpha << std::setprecision(17);
+  const auto write = [&](const char *name, const auto &value) {
+    out << name << ' ' << value << '\n';
+  };
+  write("backend", backend);
+  write("nx", p.nx);
+  write("ny", p.ny);
+  write("aspectRatio", p.aspectRatio);
+  write("domainLengthX", p.lx());
+  write("domainLengthY", p.ly());
+  write("timeStep", p.timeStep);
+  write("numberOfSteps", p.numberOfSteps);
+  write("outputIntervalSteps", p.outputIntervalSteps);
+  write("integrator", integratorName(p.integrator));
+  write("betaPlane", p.betaPlane);
+  write("beta", p.beta);
+  write("viscosity", p.viscosity);
+  write("viscosityOrder", p.viscosityOrder);
+  write("linearDrag", p.linearDrag);
+  write("dragOrder", p.dragOrder);
+  write("forcingEnabled", p.forcingEnabled);
+  write("forcingProfile", forcingProfileName(p.forcingProfile));
+  write("forcingWavenumber", p.forcingWavenumber);
+  write("forcingWidth", p.forcingWidth);
+  write("forcingAmplitude", p.forcingAmplitude);
+  write("forcingShapeOrder", p.forcingShapeOrder);
+  write("targetEnergyInjectionRate", p.targetEnergyInjectionRate);
+  write("randomSeed", p.randomSeed);
+  write("writeModeDiagnostics", p.writeModeDiagnostics);
+  write("threadCount", p.threadCount);
+  write("overwriteOutput", p.overwriteOutput);
+  write("initialConditionFile", p.initialConditionFile.string());
+  write("dataDirectory", p.dataDirectory.string());
+  write("outputDirectory", p.outputDirectory.string());
   out.close();
   if (!out)
     throw std::runtime_error("failed while writing parameter record: " +

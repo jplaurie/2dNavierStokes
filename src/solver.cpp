@@ -18,7 +18,7 @@ namespace {
 [[maybe_unused]] constexpr std::size_t parallelThreshold = 16384;
 
 SpectralField field(const Parameters &p, bool needed = true) {
-  return needed ? SpectralField(p.ny * p.nxf()) : SpectralField{};
+  return needed ? SpectralField(p.spectralSize()) : SpectralField{};
 }
 
 void requireFinite(const SpectralField &values, const char *description) {
@@ -51,22 +51,15 @@ std::uint64_t resolveRandomSeed(std::uint64_t configuredSeed) {
 Solver::Solver(Parameters p, std::unique_ptr<NonlinearBackend> backend)
     : p_(std::move(p)), backend_(std::move(backend)), baseTransform_(p_),
       linear_(field(p_)),
-      noise_(field(p_, p_.forcingEnabled &&
-                           p_.forcingProfile != ForcingProfile::singleMode)),
+      noise_(field(p_, p_.usesStochasticForcing())),
       n1_(field(p_, !backend_->deviceTimeStepping())),
       n2_(field(p_, !backend_->deviceTimeStepping())),
-      n3_(field(p_, !backend_->deviceTimeStepping() &&
-                        (p_.integrator == Integrator::etd3 ||
-                         p_.integrator == Integrator::etd4))),
-      n4_(field(p_, !backend_->deviceTimeStepping() &&
-                        p_.integrator == Integrator::etd4)),
+      n3_(field(p_, !backend_->deviceTimeStepping() && p_.usesStageB())),
+      n4_(field(p_, !backend_->deviceTimeStepping() && p_.usesStageC())),
       stageA_(field(p_, !backend_->deviceTimeStepping())),
-      stageB_(field(p_, !backend_->deviceTimeStepping() &&
-                            (p_.integrator == Integrator::etd3 ||
-                             p_.integrator == Integrator::etd4))),
-      stageC_(field(p_, !backend_->deviceTimeStepping() &&
-                            p_.integrator == Integrator::etd4)),
-      diagnosticNonlinear_(field(p_)), forcingAmplitude_(p_.ny * p_.nxf()),
+      stageB_(field(p_, !backend_->deviceTimeStepping() && p_.usesStageB())),
+      stageC_(field(p_, !backend_->deviceTimeStepping() && p_.usesStageC())),
+      diagnosticNonlinear_(field(p_)), forcingAmplitude_(p_.spectralSize()),
       noiseScale_(noise_.size()),
       random_(p_.randomSeed = resolveRandomSeed(p_.randomSeed)) {
 #ifdef _OPENMP
@@ -85,9 +78,8 @@ void Solver::buildLinearOperator() {
   forEachIndex(linear_.size(), [&](std::size_t index) {
     const std::size_t y = index / p_.nxf();
     const std::size_t x = index % p_.nxf();
-    const double ky =
-        2.0 * nsPi * static_cast<double>(signedWave(y, p_.ny)) / p_.ly();
-    const double kx = 2.0 * nsPi * static_cast<double>(x) / p_.lx();
+    const double ky = waveNumberY(p_, y);
+    const double kx = waveNumberX(p_, x);
     const double k2 = kx * kx + ky * ky;
     double value = 0.0;
     if (k2 > 0.0) {
@@ -199,8 +191,8 @@ void Solver::buildForcing() {
   for (std::size_t y = 0; y < p_.ny; ++y) {
     const long kyIndex = signedWave(y, p_.ny);
     for (std::size_t x = 0; x < p_.nxf(); ++x) {
-      const double kx = 2.0 * nsPi * static_cast<double>(x) / p_.lx();
-      const double ky = 2.0 * nsPi * static_cast<double>(kyIndex) / p_.ly();
+      const double kx = waveNumberX(p_, x);
+      const double ky = waveNumberY(p_, y);
       const double k = std::hypot(kx, ky);
       double amplitude = 0.0;
       if (p_.forcingProfile == ForcingProfile::annulus && k > 0.0 &&
@@ -322,6 +314,15 @@ void Solver::step(SpectralField &w) {
   enforceRealityConstraints(w, p_);
 }
 
+void Solver::writeState(const RestartState &state) {
+  writeVorticity(p_, baseTransform_, state.vorticity, state.frame);
+  std::ostringstream randomState, distributionState;
+  randomState << random_;
+  distributionState << normal_;
+  writeRestart(p_, state.time, state.frame, state.vorticity, randomState.str(),
+               distributionState.str());
+}
+
 void Solver::run() {
   const bool recoveredFresh = backendIsRoot() && recoverOutputTransaction(p_);
   backendBarrier();
@@ -358,13 +359,7 @@ void Solver::run() {
                     enstrophyInjectionCoefficient_);
     if (!state.restarting) {
       beginOutputTransaction(p_, state.frame);
-      writeVorticity(p_, baseTransform_, state.vorticity, state.frame);
-      std::ostringstream randomState;
-      std::ostringstream distributionState;
-      randomState << random_;
-      distributionState << normal_;
-      writeRestart(p_, state.time, state.frame, state.vorticity,
-                   randomState.str(), distributionState.str());
+      writeState(state);
       finishOutputTransaction(p_);
     }
     std::cout << "backend = " << backendName() << "\nnx = " << p_.nx
@@ -392,22 +387,14 @@ void Solver::run() {
     if (stepNumber % p_.outputIntervalSteps == 0 ||
         stepNumber == p_.numberOfSteps) {
       ++state.frame;
-      if (backend_->deviceTimeStepping())
-        backend_->downloadState(state.vorticity);
-      backend_->evaluate(state.vorticity,
-                         diagnosticNonlinear_); // MPI collective
+      backend_->downloadStateAndEvaluate(state.vorticity,
+                                         diagnosticNonlinear_); // MPI collective
       if (backendIsRoot()) {
         beginOutputTransaction(p_, state.frame);
         const double energy =
             writeDiagnostics(p_, state.time, state.frame, state.vorticity,
                              diagnosticNonlinear_, averages);
-        writeVorticity(p_, baseTransform_, state.vorticity, state.frame);
-        std::ostringstream randomState;
-        std::ostringstream distributionState;
-        randomState << random_;
-        distributionState << normal_;
-        writeRestart(p_, state.time, state.frame, state.vorticity,
-                     randomState.str(), distributionState.str());
+        writeState(state);
         finishOutputTransaction(p_);
         std::cout << "time = " << state.time << " file = " << state.frame
                   << " Energy = " << energy << '\n';

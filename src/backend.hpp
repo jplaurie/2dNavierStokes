@@ -26,8 +26,9 @@ public:
   virtual void advance(const SpectralField &) {
     throw std::logic_error("backend has no device time integrator");
   }
-  virtual void downloadState(SpectralField &) {
-    throw std::logic_error("backend has no device state");
+  virtual void downloadStateAndEvaluate(SpectralField &vorticity,
+                                        SpectralField &result) {
+    evaluate(vorticity, result);
   }
 };
 

@@ -128,12 +128,28 @@ public:
       throw std::logic_error("device buffer already allocated");
     if (count)
       cudaCheck(cudaMalloc(&data_, count * sizeof(T)),
-                "allocate integration buffer");
+                "allocate CUDA buffer");
   }
   T *data() const { return data_; }
 
 private:
   T *data_ = nullptr;
+};
+
+class CufftPlan {
+public:
+  CufftPlan() = default;
+  ~CufftPlan() {
+    if (plan_)
+      cufftDestroy(plan_);
+  }
+  CufftPlan(const CufftPlan &) = delete;
+  CufftPlan &operator=(const CufftPlan &) = delete;
+  cufftHandle *output() { return &plan_; }
+  [[nodiscard]] cufftHandle get() const { return plan_; }
+
+private:
+  cufftHandle plan_ = 0;
 };
 
 struct DeviceStages {
@@ -195,7 +211,7 @@ public:
     if (p.mx() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
         p.my() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
       throw std::runtime_error("CUDA grid dimensions exceed cuFFT limits");
-    baseCount_ = p.ny * p.nxf();
+    baseCount_ = p.spectralSize();
     paddedCount_ = p.my() * p.mxf();
     realCount_ = p.my() * p.mx();
     if (paddedCount_ >
@@ -203,53 +219,21 @@ public:
         realCount_ > static_cast<std::size_t>(std::numeric_limits<int>::max()))
       throw std::runtime_error(
           "CUDA transform allocation exceeds cuFFT stride limits");
-    try {
-      cudaCheck(cudaMalloc(&input_, baseCount_ * sizeof(cufftDoubleComplex)),
-                "cudaMalloc input");
-      cudaCheck(
-          cudaMalloc(&fields_, 4 * paddedCount_ * sizeof(cufftDoubleComplex)),
-          "cudaMalloc fields");
-      cudaCheck(cudaMalloc(&realFields_, 4 * realCount_ * sizeof(double)),
-                "cudaMalloc real fields");
-      cudaCheck(cudaMalloc(&product_, realCount_ * sizeof(double)),
-                "cudaMalloc product");
-      cudaCheck(
-          cudaMalloc(&paddedOutput_, paddedCount_ * sizeof(cufftDoubleComplex)),
-          "cudaMalloc output");
-      cudaCheck(cudaMalloc(&result_, baseCount_ * sizeof(cufftDoubleComplex)),
-                "cudaMalloc result");
+    input_.allocate(baseCount_);
+    fields_.allocate(4 * paddedCount_);
+    realFields_.allocate(4 * realCount_);
+    product_.allocate(realCount_);
+    paddedOutput_.allocate(paddedCount_);
+    result_.allocate(baseCount_);
 
-      int dimensions[] = {static_cast<int>(p.my()), static_cast<int>(p.mx())};
-      cufftCheck(cufftPlanMany(&inverse_, 2, dimensions, nullptr, 1,
-                               static_cast<int>(paddedCount_), nullptr, 1,
-                               static_cast<int>(realCount_), CUFFT_Z2D, 4),
-                 "create batched inverse plan");
-      cufftCheck(
-          cufftPlan2d(&forward_, dimensions[0], dimensions[1], CUFFT_D2Z),
-          "create forward plan");
-    } catch (...) {
-      release();
-      throw;
-    }
-  }
-
-  ~CudaBackend() override { release(); }
-
-  void release() noexcept {
-    if (inverse_)
-      cufftDestroy(inverse_);
-    if (forward_)
-      cufftDestroy(forward_);
-    cudaFree(input_);
-    cudaFree(fields_);
-    cudaFree(realFields_);
-    cudaFree(product_);
-    cudaFree(paddedOutput_);
-    cudaFree(result_);
-    inverse_ = 0;
-    forward_ = 0;
-    input_ = fields_ = paddedOutput_ = result_ = nullptr;
-    realFields_ = product_ = nullptr;
+    int dimensions[] = {static_cast<int>(p.my()), static_cast<int>(p.mx())};
+    cufftCheck(cufftPlanMany(inverse_.output(), 2, dimensions, nullptr, 1,
+                             static_cast<int>(paddedCount_), nullptr, 1,
+                             static_cast<int>(realCount_), CUFFT_Z2D, 4),
+               "create batched inverse plan");
+    cufftCheck(cufftPlan2d(forward_.output(), dimensions[0], dimensions[1],
+                           CUFFT_D2Z),
+               "create forward plan");
   }
 
   bool deviceTimeStepping() const override { return true; }
@@ -274,12 +258,11 @@ public:
         coefficientBuffers_[8].data(), coefficientBuffers_[9].data()};
     for (std::size_t i : {0UL, 3UL, 4UL})
       stageBuffers_[i].allocate(baseCount_); // a, n1, n2
-    if (p_.integrator == Integrator::etd3 ||
-        p_.integrator == Integrator::etd4) {
+    if (p_.usesStageB()) {
       stageBuffers_[1].allocate(baseCount_);
       stageBuffers_[5].allocate(baseCount_);
     }
-    if (p_.integrator == Integrator::etd4) {
+    if (p_.usesStageC()) {
       stageBuffers_[2].allocate(baseCount_);
       stageBuffers_[6].allocate(baseCount_);
     }
@@ -293,7 +276,7 @@ public:
                            forcing.size() * sizeof(double),
                            cudaMemcpyHostToDevice),
                 "upload deterministic forcing");
-    if (p_.forcingEnabled && p_.forcingProfile != ForcingProfile::singleMode)
+    if (p_.usesStochasticForcing())
       noise_.allocate(baseCount_);
     uploadState(w);
   }
@@ -307,7 +290,7 @@ public:
                            cudaMemcpyHostToDevice),
                 "upload stochastic increment");
     }
-    rightHandSide(input_, stages_.n1);
+    rightHandSide(input_.data(), stages_.n1);
     launchStage(0);
     rightHandSide(stages_.a, stages_.n2);
     if (stages_.n3) {
@@ -319,28 +302,39 @@ public:
       rightHandSide(stages_.c, stages_.n4);
     }
     launchStage(3);
-    constrain(input_);
+    constrain(input_.data());
   }
 
-  void downloadState(SpectralField &w) override {
+  void downloadStateAndEvaluate(SpectralField &w,
+                                SpectralField &output) override {
+    evaluateDevice(input_.data(), result_.data());
+    downloadState(w);
+    downloadResult(output);
+  }
+
+  void evaluate(const SpectralField &w, SpectralField &output) override {
+    uploadState(w);
+    evaluateDevice(input_.data(), result_.data());
+    downloadResult(output);
+  }
+
+private:
+  void downloadState(SpectralField &w) {
     w.resize(baseCount_);
-    cudaCheck(cudaMemcpy(w.data(), input_,
+    cudaCheck(cudaMemcpy(w.data(), input_.data(),
                          baseCount_ * sizeof(cufftDoubleComplex),
                          cudaMemcpyDeviceToHost),
               "download integrated vorticity");
   }
 
-  void evaluate(const SpectralField &w, SpectralField &output) override {
-    uploadState(w);
-    evaluateDevice(input_, result_);
+  void downloadResult(SpectralField &output) {
     output.resize(baseCount_);
-    cudaCheck(cudaMemcpy(output.data(), result_,
+    cudaCheck(cudaMemcpy(output.data(), result_.data(),
                          baseCount_ * sizeof(cufftDoubleComplex),
                          cudaMemcpyDeviceToHost),
               "download nonlinear term");
   }
 
-private:
   static constexpr int threads = 256;
   int blocks(std::size_t count) const {
     return static_cast<int>((count + threads - 1) / threads);
@@ -349,7 +343,7 @@ private:
   void uploadState(const SpectralField &w) {
     if (w.size() != baseCount_)
       throw std::runtime_error("invalid nonlinear input size");
-    cudaCheck(cudaMemcpy(input_, w.data(),
+    cudaCheck(cudaMemcpy(input_.data(), w.data(),
                          baseCount_ * sizeof(cufftDoubleComplex),
                          cudaMemcpyHostToDevice),
               "upload vorticity");
@@ -362,8 +356,8 @@ private:
 
   void launchStage(int stage) {
     integrateStage<<<blocks(baseCount_), threads>>>(
-        stage, p_.integrator, p_.timeStep, baseCount_, coefficients_, input_,
-        stages_, noise_.data());
+        stage, p_.integrator, p_.timeStep, baseCount_, coefficients_,
+        input_.data(), stages_, noise_.data());
     cudaCheck(cudaGetLastError(), "integrate device Runge-Kutta stage");
   }
 
@@ -378,17 +372,19 @@ private:
 
   void evaluateDevice(const cufftDoubleComplex *w, cufftDoubleComplex *output) {
     populateComponents<<<blocks(paddedCount_), threads>>>(
-        w, fields_, p_.ny, p_.nxf(), p_.my(), p_.mxf(), p_.lx(), p_.ly());
+        w, fields_.data(), p_.ny, p_.nxf(), p_.my(), p_.mxf(), p_.lx(),
+        p_.ly());
     cudaCheck(cudaGetLastError(), "launch spectral derivative kernel");
-    cufftCheck(cufftExecZ2D(inverse_, fields_, realFields_),
+    cufftCheck(cufftExecZ2D(inverse_.get(), fields_.data(), realFields_.data()),
                "execute batched inverse transform");
-    multiplyFields<<<blocks(realCount_), threads>>>(realFields_, product_,
-                                                    realCount_);
+    multiplyFields<<<blocks(realCount_), threads>>>(
+        realFields_.data(), product_.data(), realCount_);
     cudaCheck(cudaGetLastError(), "launch nonlinear product kernel");
-    cufftCheck(cufftExecD2Z(forward_, product_, paddedOutput_),
+    cufftCheck(cufftExecD2Z(forward_.get(), product_.data(),
+                            paddedOutput_.data()),
                "execute forward transform");
     extractModes<<<blocks(baseCount_), threads>>>(
-        paddedOutput_, output, p_.ny, p_.nxf(), p_.my(), p_.mxf(),
+        paddedOutput_.data(), output, p_.ny, p_.nxf(), p_.my(), p_.mxf(),
         1.0 / static_cast<double>(p_.mx() * p_.my()));
     cudaCheck(cudaGetLastError(), "launch spectral extraction kernel");
     constrain(output);
@@ -403,10 +399,9 @@ private:
 
   Parameters p_;
   std::size_t baseCount_ = 0, paddedCount_ = 0, realCount_ = 0;
-  cufftDoubleComplex *input_ = nullptr, *fields_ = nullptr,
-                     *paddedOutput_ = nullptr, *result_ = nullptr;
-  double *realFields_ = nullptr, *product_ = nullptr;
-  cufftHandle inverse_ = 0, forward_ = 0;
+  DeviceBuffer<cufftDoubleComplex> input_, fields_, paddedOutput_, result_;
+  DeviceBuffer<double> realFields_, product_;
+  CufftPlan inverse_, forward_;
 };
 } // namespace
 

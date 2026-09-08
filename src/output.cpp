@@ -52,7 +52,7 @@ SpectralField readCheckpoint(const Parameters &p, std::uint64_t frame) {
   input.read(reinterpret_cast<char *>(&count), sizeof(count));
   const std::string format(magic, 7);
   if (!input || (format != "NS2DCP1" && format != "NS2DCP2") || nx != p.nx ||
-      ny != p.ny || count != p.ny * p.nxf())
+      ny != p.ny || count != p.spectralSize())
     throw std::runtime_error("invalid spectral checkpoint header: " +
                              path.string());
   SpectralField field(static_cast<std::size_t>(count));
@@ -197,10 +197,7 @@ bool containsSolverOutput(const std::filesystem::path &directory) {
 }
 
 double waveNumber(const Parameters &p, std::size_t x, std::size_t y) {
-  const double kx = 2.0 * nsPi * static_cast<double>(x) / p.lx();
-  const double ky =
-      2.0 * nsPi * static_cast<double>(signedWave(y, p.ny)) / p.ly();
-  return std::hypot(kx, ky);
+  return std::hypot(waveNumberX(p, x), waveNumberY(p, y));
 }
 } // namespace
 
@@ -399,7 +396,8 @@ double writeDiagnostics(const Parameters &p, double time, std::uint64_t frame,
     for (std::size_t x = 0; x < p.nxf(); ++x) {
       const double k = waveNumber(p, x, y);
       const double multiplicity = (x == 0 || x == p.nx / 2) ? 1.0 : 2.0;
-      const double w2 = std::norm(w[spectralIndex(x, y, p.nxf())]);
+      const std::size_t index = spectralIndex(x, y, p.nxf());
+      const double w2 = std::norm(w[index]);
       if (k > 0.0) {
         energy += 0.5 * multiplicity * w2 / (k * k);
         enstrophy += 0.5 * multiplicity * w2;
@@ -426,8 +424,7 @@ double writeDiagnostics(const Parameters &p, double time, std::uint64_t frame,
       if (k > 0.0)
         energySpectrum[bin] += halfMultiplicity * w2 / (k * k);
       const double transfer =
-          multiplicity * std::real(std::conj(w[spectralIndex(x, y, p.nxf())]) *
-                                   adv[spectralIndex(x, y, p.nxf())]);
+          multiplicity * std::real(std::conj(w[index]) * adv[index]);
       enstrophyShell[bin] += transfer;
       if (k > 0.0)
         energyShell[bin] += transfer / (k * k);
@@ -611,11 +608,10 @@ void writeForcingFiles(const Parameters &p,
   out << "kx,ky,amplitude,multiplicity\n";
   if (p.forcingEnabled) {
     for (std::size_t x = 0; x < p.nxf(); ++x) {
-      const double kx = 2.0 * nsPi * static_cast<double>(x) / p.lx();
+      const double kx = waveNumberX(p, x);
       const int multiplicity = (x == 0 || x == p.nx / 2) ? 1 : 2;
       for (std::size_t y = 0; y < p.ny; ++y) {
-        const double ky =
-            2.0 * nsPi * static_cast<double>(signedWave(y, p.ny)) / p.ly();
+        const double ky = waveNumberY(p, y);
         out << kx << ',' << ky << ',' << amplitude[spectralIndex(x, y, p.nxf())]
             << ',' << multiplicity << '\n';
       }

@@ -31,6 +31,24 @@ template <class T> struct FftwAllocator {
 using FftwSpectralField = std::vector<Complex, FftwAllocator<Complex>>;
 using FftwRealField = std::vector<double, FftwAllocator<double>>;
 
+class FftwPlan {
+public:
+  FftwPlan() = default;
+  ~FftwPlan() { reset(); }
+  FftwPlan(const FftwPlan &) = delete;
+  FftwPlan &operator=(const FftwPlan &) = delete;
+  void reset(fftw_plan plan = nullptr) noexcept {
+    if (plan_)
+      fftw_destroy_plan(plan_);
+    plan_ = plan;
+  }
+  void execute() const { fftw_execute(plan_); }
+  [[nodiscard]] explicit operator bool() const { return plan_ != nullptr; }
+
+private:
+  fftw_plan plan_ = nullptr;
+};
+
 template <class Allocator>
 inline fftw_complex *fftwData(std::vector<Complex, Allocator> &field) {
   static_assert(sizeof(Complex) == sizeof(fftw_complex));
@@ -47,7 +65,6 @@ fftwData(const std::vector<Complex, Allocator> &field) {
 class BaseTransform {
 public:
   explicit BaseTransform(const Parameters &parameters);
-  ~BaseTransform();
   BaseTransform(const BaseTransform &) = delete;
   BaseTransform &operator=(const BaseTransform &) = delete;
 
@@ -56,8 +73,7 @@ public:
 
 private:
   Parameters p_;
-  fftw_plan forward_ = nullptr;
-  fftw_plan inverse_ = nullptr;
   FftwRealField planningReal_;
   FftwSpectralField planningComplex_;
+  FftwPlan forward_, inverse_;
 };

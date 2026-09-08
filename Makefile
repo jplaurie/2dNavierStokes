@@ -10,14 +10,8 @@ all: configure
 configure:
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
 
-cpu: configure
-	cmake --build $(BUILD_DIR) --target navier_stokes_cpu -j$(JOBS)
-
-mpi: configure
-	cmake --build $(BUILD_DIR) --target navier_stokes_mpi -j$(JOBS)
-
-cuda: configure
-	cmake --build $(BUILD_DIR) --target navier_stokes_cuda -j$(JOBS)
+cpu mpi cuda: configure
+	cmake --build $(BUILD_DIR) --target navier_stokes_$@ -j$(JOBS)
 
 test: all
 	ctest --test-dir $(BUILD_DIR) --output-on-failure

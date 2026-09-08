@@ -4,7 +4,7 @@
 #include <stdexcept>
 
 void enforceRealityConstraints(SpectralField &a, const Parameters &p) {
-  if (a.size() != p.ny * p.nxf())
+  if (a.size() != p.spectralSize())
     throw std::runtime_error("invalid spectral field size");
   const auto at = [&](std::size_t x, std::size_t y) -> Complex & {
     return a[spectralIndex(x, y, p.nxf())];

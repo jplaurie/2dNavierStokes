@@ -21,6 +21,7 @@ private:
   void generateNoise(SpectralField &noise);
   void rightHandSide(const SpectralField &input, SpectralField &output);
   void step(SpectralField &vorticity);
+  void writeState(const RestartState &state);
 
   Parameters p_;
   std::unique_ptr<NonlinearBackend> backend_;

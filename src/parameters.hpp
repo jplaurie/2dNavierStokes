@@ -44,11 +44,19 @@ struct Parameters {
   [[nodiscard]] std::size_t mx() const { return 3 * nx / 2; }
   [[nodiscard]] std::size_t my() const { return 3 * ny / 2; }
   [[nodiscard]] std::size_t mxf() const { return mx() / 2 + 1; }
+  [[nodiscard]] std::size_t spectralSize() const { return ny * nxf(); }
   [[nodiscard]] double lx() const;
   [[nodiscard]] double ly() const;
   [[nodiscard]] std::size_t spectrumBins() const;
   [[nodiscard]] bool usesEtd() const {
     return integrator != Integrator::integratingFactorRk2;
+  }
+  [[nodiscard]] bool usesStageB() const {
+    return integrator == Integrator::etd3 || integrator == Integrator::etd4;
+  }
+  [[nodiscard]] bool usesStageC() const { return integrator == Integrator::etd4; }
+  [[nodiscard]] bool usesStochasticForcing() const {
+    return forcingEnabled && forcingProfile != ForcingProfile::singleMode;
   }
 };
 

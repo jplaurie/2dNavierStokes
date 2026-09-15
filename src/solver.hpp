@@ -7,6 +7,7 @@
 #include <array>
 #include <memory>
 #include <random>
+#include <utility>
 #include <vector>
 
 class Solver {
@@ -32,7 +33,9 @@ private:
   SpectralField diagnosticNonlinear_;
   std::vector<double> forcingAmplitude_, noiseScale_;
   std::vector<std::size_t> forcedIndices_;
+  std::vector<std::pair<std::size_t, std::size_t>> compactNoiseRealityPairs_;
   std::size_t forcedModeCount_ = 0;
+  bool compactDeviceNoise_ = false;
   double energyInjectionCoefficient_ = 0.0;
   double enstrophyInjectionCoefficient_ = 0.0;
   std::mt19937_64 random_;

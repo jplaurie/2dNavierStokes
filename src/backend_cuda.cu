@@ -179,6 +179,18 @@ __global__ void addForcing(cufftDoubleComplex *n, const double *forcing,
     n[i].x += forcing[i];
 }
 
+__global__ void addSparseNoise(cufftDoubleComplex *w,
+                               const cufftDoubleComplex *noise,
+                               const std::size_t *indices,
+                               std::size_t count) {
+  const std::size_t i =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) {
+    const std::size_t destination = indices[i];
+    w[destination] = w[destination] + noise[i];
+  }
+}
+
 __global__ void
 integrateStage(int stage, Integrator method, double h, std::size_t count,
                CoefficientPointers<cufftDoubleComplex> coefficients,
@@ -240,6 +252,7 @@ public:
 
   void initializeTimeStepping(const IntegrationCoefficients &c,
                               const std::vector<double> &forcing,
+                              const std::vector<std::size_t> &stochasticIndices,
                               const SpectralField &w) override {
     const auto arrays = c.fields();
     for (std::size_t i = 0; i < arrays.size(); ++i) {
@@ -276,17 +289,30 @@ public:
                            forcing.size() * sizeof(double),
                            cudaMemcpyHostToDevice),
                 "upload deterministic forcing");
-    if (p_.usesStochasticForcing())
-      noise_.allocate(baseCount_);
+    if (p_.usesStochasticForcing()) {
+      compactNoise_ = !stochasticIndices.empty();
+      noiseCount_ = compactNoise_ ? stochasticIndices.size() : baseCount_;
+      for (const std::size_t index : stochasticIndices)
+        if (index >= baseCount_)
+          throw std::runtime_error("compact stochastic index is out of range");
+      noise_.allocate(noiseCount_);
+      if (compactNoise_) {
+        noiseIndices_.allocate(noiseCount_);
+        cudaCheck(cudaMemcpy(noiseIndices_.data(), stochasticIndices.data(),
+                             noiseCount_ * sizeof(std::size_t),
+                             cudaMemcpyHostToDevice),
+                  "upload stochastic mode indices");
+      }
+    }
     uploadState(w);
   }
 
   void advance(const SpectralField &noise) override {
     if (!noise.empty()) {
-      if (!noise_.data() || noise.size() != baseCount_)
+      if (!noise_.data() || noise.size() != noiseCount_)
         throw std::runtime_error("invalid device noise field");
       cudaCheck(cudaMemcpy(noise_.data(), noise.data(),
-                           baseCount_ * sizeof(cufftDoubleComplex),
+                           noiseCount_ * sizeof(cufftDoubleComplex),
                            cudaMemcpyHostToDevice),
                 "upload stochastic increment");
     }
@@ -302,6 +328,11 @@ public:
       rightHandSide(stages_.c, stages_.n4);
     }
     launchStage(3);
+    if (compactNoise_) {
+      addSparseNoise<<<blocks(noiseCount_), threads>>>(
+          input_.data(), noise_.data(), noiseIndices_.data(), noiseCount_);
+      cudaCheck(cudaGetLastError(), "add compact stochastic increment");
+    }
     constrain(input_.data());
   }
 
@@ -357,7 +388,7 @@ private:
   void launchStage(int stage) {
     integrateStage<<<blocks(baseCount_), threads>>>(
         stage, p_.integrator, p_.timeStep, baseCount_, coefficients_,
-        input_.data(), stages_, noise_.data());
+        input_.data(), stages_, compactNoise_ ? nullptr : noise_.data());
     cudaCheck(cudaGetLastError(), "integrate device Runge-Kutta stage");
   }
 
@@ -393,12 +424,15 @@ private:
   std::array<DeviceBuffer<cufftDoubleComplex>, 10> coefficientBuffers_;
   std::array<DeviceBuffer<cufftDoubleComplex>, 7> stageBuffers_;
   DeviceBuffer<cufftDoubleComplex> noise_;
+  DeviceBuffer<std::size_t> noiseIndices_;
   DeviceBuffer<double> forcing_;
   CoefficientPointers<cufftDoubleComplex> coefficients_;
   DeviceStages stages_;
 
   Parameters p_;
   std::size_t baseCount_ = 0, paddedCount_ = 0, realCount_ = 0;
+  std::size_t noiseCount_ = 0;
+  bool compactNoise_ = false;
   DeviceBuffer<cufftDoubleComplex> input_, fields_, paddedOutput_, result_;
   DeviceBuffer<double> realFields_, product_;
   CufftPlan inverse_, forward_;

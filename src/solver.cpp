@@ -70,8 +70,34 @@ Solver::Solver(Parameters p, std::unique_ptr<NonlinearBackend> backend)
   std::filesystem::create_directories(p_.outputDirectory);
   buildLinearOperator();
   buildIntegrationCoefficients();
-  if (p_.forcingEnabled)
+  if (p_.forcingEnabled) {
     buildForcing();
+    // A narrow stochastic spectrum should not require a full spectral field to
+    // cross the PCIe bus every step. Keep the dense representation for broad
+    // spectra, where a separate scatter kernel would save little transfer.
+    if (p_.usesStochasticForcing() && backend_->deviceTimeStepping() &&
+        forcedIndices_.size() < noise_.size() / 2) {
+      compactDeviceNoise_ = true;
+      SpectralField compactNoise(forcedIndices_.size());
+      noise_.swap(compactNoise);
+      for (std::size_t destination = 0;
+           destination < forcedIndices_.size(); ++destination) {
+        const std::size_t index = forcedIndices_[destination];
+        const std::size_t x = index % p_.nxf();
+        const std::size_t y = index / p_.nxf();
+        if (x != 0 || y <= p_.ny / 2)
+          continue;
+        const std::size_t partnerIndex = (p_.ny - y) * p_.nxf();
+        const auto partner = std::lower_bound(forcedIndices_.begin(),
+                                              forcedIndices_.end(), partnerIndex);
+        if (partner == forcedIndices_.end() || *partner != partnerIndex)
+          throw std::logic_error("compact stochastic mode lacks its conjugate");
+        compactNoiseRealityPairs_.emplace_back(
+            destination,
+            static_cast<std::size_t>(partner - forcedIndices_.begin()));
+      }
+    }
+  }
 }
 
 void Solver::buildLinearOperator() {
@@ -260,15 +286,23 @@ void Solver::buildForcing() {
 }
 
 void Solver::generateNoise(SpectralField &noise) {
-  std::fill(noise.begin(), noise.end(), Complex{});
+  if (!compactDeviceNoise_)
+    std::fill(noise.begin(), noise.end(), Complex{});
   const double scale = std::sqrt(0.5);
-  for (const std::size_t i : forcedIndices_) {
+  for (std::size_t position = 0; position < forcedIndices_.size(); ++position) {
+    const std::size_t i = forcedIndices_[position];
     const double amplitude = forcingAmplitude_[i];
     const double real = normal_(random_);
     const double imaginary = normal_(random_);
-    noise[i] = (amplitude * scale * noiseScale_[i]) * Complex(real, imaginary);
+    noise[compactDeviceNoise_ ? position : i] =
+        (amplitude * scale * noiseScale_[i]) * Complex(real, imaginary);
   }
-  enforceRealityConstraints(noise, p_);
+  if (compactDeviceNoise_) {
+    for (const auto [destination, source] : compactNoiseRealityPairs_)
+      noise[destination] = std::conj(noise[source]);
+  } else {
+    enforceRealityConstraints(noise, p_);
+  }
 }
 
 void Solver::rightHandSide(const SpectralField &input, SpectralField &output) {
@@ -370,11 +404,13 @@ void Solver::run() {
   }
   if (backend_->deviceTimeStepping()) {
     const std::vector<double> noForcing;
+    const std::vector<std::size_t> noStochasticIndices;
     backend_->initializeTimeStepping(
         coefficients_,
         p_.forcingEnabled && p_.forcingProfile == ForcingProfile::singleMode
             ? forcingAmplitude_
             : noForcing,
+        compactDeviceNoise_ ? forcedIndices_ : noStochasticIndices,
         state.vorticity);
     coefficients_ = {};
   }

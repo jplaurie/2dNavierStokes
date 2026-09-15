@@ -20,6 +20,7 @@ public:
   [[nodiscard]] virtual bool deviceTimeStepping() const { return false; }
   virtual void initializeTimeStepping(const IntegrationCoefficients &,
                                       const std::vector<double> &,
+                                      const std::vector<std::size_t> &,
                                       const SpectralField &) {
     throw std::logic_error("backend has no device time integrator");
   }

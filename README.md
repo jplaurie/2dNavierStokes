@@ -197,6 +197,17 @@ interrupted frame is rolled back automatically. For a new simulation, use new
 `dataDirectory` and `outputDirectory` paths. `overwriteOutput` permits file
 replacement, but does not turn a detected restart into a fresh run.
 
+## Plotting and movies
+
+The [`scripts/`](scripts/) directory contains Jupyter plotting notebooks for
+vorticity, the separately reconstructed `u` and `v` velocity fields, spectra,
+fluxes, and time diagnostics. It also contains command-line MP4/GIF movie
+generators for the physical fields, spectra, and fluxes. The notebooks support
+single frames, multiple frames, and frame averages and write publication-ready
+PDF figures. Movie output supports H.264 and H.265/HEVC through ffmpeg. See
+[`scripts/README.md`](scripts/README.md) for dependencies, configuration, and
+examples.
+
 ## Code structure
 
 ```text
@@ -217,7 +228,11 @@ examples/
   quickstart.params           small reproducible example
 tests/
   numerics.cpp                numerical unit tests
-  regression.py               output, restart, and backend regression testse
+  regression.py               output, restart, and backend regression tests
+scripts/
+  ns2d_plotting.py            shared readers, styling, and velocity recovery
+  *.ipynb                     physical and diagnostic PDF plotting notebooks
+  movie_*.py                  MP4/GIF field, spectrum, and flux movies
 ```
 
 The `Solver` owns the shared simulation state and delegates only nonlinear

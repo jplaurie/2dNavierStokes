@@ -4,3 +4,5 @@
 /parameters.txt
 *.o
 *.swp
+__pycache__/
+*.py[cod]

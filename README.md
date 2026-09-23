@@ -83,9 +83,9 @@ white-in-time noise. In spectral notation,
 d\widehat\omega_{\boldsymbol{k}}\big|_{\mathrm{force}}
 =f(|\boldsymbol{k}|)\,dW_{\boldsymbol{k}},
 \qquad
-\mathbb E[dW_{\boldsymbol{k}}]=0,
+\mathbb{E}[dW_{\boldsymbol{k}}]=0,
 \qquad
-\mathbb E[dW_{\boldsymbol{k}}dW_{\boldsymbol{k}'}^*]
+\mathbb{E}[dW_{\boldsymbol{k}}dW_{\boldsymbol{k}'}^*]
 =\delta_{\boldsymbol{k}\boldsymbol{k}'}\,dt,
 \qquad
 dW_{-\boldsymbol{k}}=dW_{\boldsymbol{k}}^*,
@@ -96,7 +96,7 @@ with envelopes
 ```math
 \begin{aligned}
 f_{\mathrm{annulus}}(k)
-  &=A\,\mathbf 1_{\{|k-k_f|<\Delta k\}},\\
+  &=A\,\mathbf{1}_{\{\lvert k-k_f\rvert<\Delta k\}},\\
 f_{\mathrm{exponential}}(k)
   &=A\left(\frac{k}{k_f}\right)^s
     \exp\!\left[-\left(\frac{k}{k_f}\right)^s\right].

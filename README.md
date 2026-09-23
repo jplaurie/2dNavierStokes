@@ -16,22 +16,118 @@ and output format:
 The current solver is self-contained; the original source trees are kept in
 [`archived/`](archived/) for reference.
 
-## Method
+## Equation, forcing, and dissipation
 
-The solver evolves vorticity `omega` on a domain with
-`Lx = 2*pi*aspectRatio` and `Ly = 2*pi`:
+The solver evolves the scalar vorticity $\omega(\boldsymbol{x},t)$ on the
+doubly periodic domain $L_x=2\pi A_r$, $L_y=2\pi$, where $A_r$ is
+`aspectRatio`. The complete equation represented by the parameter file is
 
 ```math
-\partial_t\omega = -\boldsymbol{u}\cdot\nabla\omega
-                    - \beta\,\partial_x\psi
-                    - \nu(-\Delta)^p\omega
-                    - \alpha(-\Delta)^q\omega + F,
+\partial_t\omega
++\boldsymbol{u}\cdot\nabla\omega
++\beta\,\partial_x\psi
+=-\nu(-\Delta)^p\omega
+-\alpha(-\Delta)^q\omega
++F(\boldsymbol{x},t),
 ```
 
-where `omega = Delta psi` and `u = (-partial_y psi, partial_x psi)`. The
-beta-plane term is enabled with `betaPlane`. `viscosity` and `linearDrag`
-control the two damping terms; their powers are `viscosityOrder` and
-`dragOrder`.
+with the streamfunction and incompressible velocity defined by
+
+```math
+\omega=\Delta\psi,
+\qquad
+\boldsymbol{u}=(-\partial_y\psi,\,\partial_x\psi),
+\qquad
+\nabla\cdot\boldsymbol{u}=0.
+```
+
+The beta-plane term is present only when `betaPlane true`; its coefficient is
+`beta`. In Fourier space, the linear part is
+
+```math
+\partial_t\widehat\omega_{\boldsymbol{k}}\big|_{\mathrm{linear}}
+=\left[
+  i\beta\frac{k_x}{|\boldsymbol{k}|^2}
+  -\nu|\boldsymbol{k}|^{2p}
+  -\alpha|\boldsymbol{k}|^{2q}
+ \right]\widehat\omega_{\boldsymbol{k}},
+\qquad \boldsymbol{k}\ne\boldsymbol{0}.
+```
+
+Here $(\nu,p)$ are `viscosity` and `viscosityOrder`, and
+$(\alpha,q)$ are `linearDrag` and `dragOrder`. Thus the same implementation
+covers ordinary or hyperviscosity through $p$, and linear or scale-selective
+drag through $q$. The zero vorticity mode is removed.
+
+With $F=\nu=\alpha=0$, nonlinear advection and the beta-plane term conserve
+kinetic energy and enstrophy:
+
+```math
+E=\frac12\int_\Omega|\boldsymbol{u}|^2\,d^2x
+=\frac12\sum_{\boldsymbol{k}\ne0}
+  \frac{|\widehat\omega_{\boldsymbol{k}}|^2}{|\boldsymbol{k}|^2},
+\qquad
+Z=\frac12\int_\Omega\omega^2\,d^2x
+=\frac12\sum_{\boldsymbol{k}}|\widehat\omega_{\boldsymbol{k}}|^2,
+```
+
+up to the Fourier-normalization/domain-area convention used by the diagnostic
+files.
+
+### Forcing profiles
+
+For `annulus` and `exponential`, the forcing is real-valued Gaussian
+white-in-time noise. In spectral notation,
+
+```math
+d\widehat\omega_{\boldsymbol{k}}\big|_{\mathrm{force}}
+=f(|\boldsymbol{k}|)\,dW_{\boldsymbol{k}},
+\qquad
+\mathbb E[dW_{\boldsymbol{k}}]=0,
+\qquad
+\mathbb E[dW_{\boldsymbol{k}}dW_{\boldsymbol{k}'}^*]
+=\delta_{\boldsymbol{k}\boldsymbol{k}'}\,dt,
+\qquad
+dW_{-\boldsymbol{k}}=dW_{\boldsymbol{k}}^*,
+```
+
+with envelopes
+
+```math
+\begin{aligned}
+f_{\mathrm{annulus}}(k)
+  &=A\,\mathbf 1_{\{|k-k_f|<\Delta k\}},\\
+f_{\mathrm{exponential}}(k)
+  &=A\left(\frac{k}{k_f}\right)^s
+    \exp\!\left[-\left(\frac{k}{k_f}\right)^s\right].
+\end{aligned}
+```
+
+The symbols $A,k_f,\Delta k,s$ map to `forcingAmplitude`,
+`forcingWavenumber`, `forcingWidth`, and `forcingShapeOrder`. A positive
+`targetEnergyInjectionRate` rescales the stochastic spectrum to the requested
+coefficient
+
+```math
+\varepsilon=\frac12\sum_{\boldsymbol{k}\ne0}
+\frac{|f(|\boldsymbol{k}|)|^2}{|\boldsymbol{k}|^2},
+```
+
+using the solver's real-transform multiplicities. `singleMode` is
+deterministic and acts on the two independent stored modes corresponding to
+$(m,m)$ and $(m,-m)$, with signs chosen to preserve a real vorticity
+field and $m=\texttt{forcingWavenumber}$.
+
+### Parameter-symbol map and discretization
+
+| Symbol | Parameter key | Meaning |
+| --- | --- | --- |
+| $N_x,N_y$ | `nx`, `ny` | Physical-grid dimensions |
+| $A_r$ | `aspectRatio` | Domain aspect ratio $L_x/L_y$ |
+| $\Delta t$ | `timeStep` | Fixed timestep |
+| $\beta$ | `beta` | Beta-plane coefficient; gated by `betaPlane` |
+| $\nu,p$ | `viscosity`, `viscosityOrder` | Small-scale damping coefficient and power |
+| $\alpha,q$ | `linearDrag`, `dragOrder` | Large-scale damping coefficient and power |
 
 Advection is evaluated on a fully padded 3/2-rule grid. The zero mode and the
 even-grid Nyquist lines are removed. Available fixed-step integrators are

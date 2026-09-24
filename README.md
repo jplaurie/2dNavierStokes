@@ -334,3 +334,12 @@ scripts/
 The `Solver` owns the shared simulation state and delegates only nonlinear
 advection to the selected backend. This keeps the CPU, MPI, and CUDA programs
 on the same parameter, forcing, integration, diagnostic, and restart paths.
+
+## License and citation
+
+Copyright (c) 2022–2026 Jason Laurie. This project is distributed under the
+[BSD 3-Clause License](LICENSE). Third-party dependencies, including FFTW,
+remain subject to their own license terms.
+
+If this software contributes to research or a publication, please cite it
+using the metadata in [`CITATION.cff`](CITATION.cff).

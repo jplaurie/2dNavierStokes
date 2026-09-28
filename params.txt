@@ -1,23 +1,23 @@
 # Production-scale example. Copy this file and adjust it for each run.
-nx 1024
-ny 1024
+nx 256
+ny 256
 aspectRatio 1.0
-timeStep 1e-5
+timeStep 1.e-4
 numberOfSteps 9999999999
-outputIntervalSteps 10000
+outputIntervalSteps 1000
 
 integrator etd4
 betaPlane false
 beta 36
-viscosity 1e-41
+viscosity 1e-32
 viscosityOrder 8
-linearDrag 1e-4
+linearDrag 0.e-4
 dragOrder 0
 
 forcingEnabled true
 forcingProfile annulus
-forcingWavenumber 256
-forcingWidth 4
+forcingWavenumber 50
+forcingWidth 2
 forcingAmplitude 10.0
 forcingShapeOrder 4
 targetEnergyInjectionRate 0

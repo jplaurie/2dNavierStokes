@@ -15,6 +15,7 @@ add_library(ns2d_common
     src/parameters.cpp
     src/fftw_utils.cpp
     src/spectral.cpp
+    src/diagnostics.cpp
     src/output.cpp
     src/output_transaction.cpp
     src/solver.cpp)
@@ -82,6 +83,10 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(ns2d_parameters_tests tests/parameters.cpp)
+  configure_host_target(ns2d_parameters_tests)
+  add_test(NAME parameter_parsing COMMAND ns2d_parameters_tests)
+
   add_executable(ns2d_numerics_tests tests/numerics.cpp src/backend_cpu.cpp)
   configure_host_target(ns2d_numerics_tests)
   add_test(NAME nonlinear_direct_dft COMMAND ns2d_numerics_tests)

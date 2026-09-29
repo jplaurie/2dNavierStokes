@@ -13,24 +13,20 @@ using Complex = std::complex<double>;
 using SpectralField = std::vector<Complex>;
 
 class NonlinearBackend {
-public:
-  virtual ~NonlinearBackend() = default;
-  virtual void evaluate(const SpectralField &vorticity,
-                        SpectralField &result) = 0;
-  [[nodiscard]] virtual bool deviceTimeStepping() const { return false; }
-  virtual void initializeTimeStepping(const IntegrationCoefficients &,
-                                      const std::vector<double> &,
-                                      const std::vector<std::size_t> &,
-                                      const SpectralField &) {
-    throw std::logic_error("backend has no device time integrator");
-  }
-  virtual void advance(const SpectralField &) {
-    throw std::logic_error("backend has no device time integrator");
-  }
-  virtual void downloadStateAndEvaluate(SpectralField &vorticity,
-                                        SpectralField &result) {
-    evaluate(vorticity, result);
-  }
+  public:
+    virtual ~NonlinearBackend() = default;
+    virtual void evaluate(const SpectralField &vorticity, SpectralField &result) = 0;
+    [[nodiscard]] virtual bool supportsDeviceTimeStepping() const { return false; }
+    virtual void initializeDeviceState(const IntegrationCoefficients &, const std::vector<double> &,
+                                       const std::vector<std::size_t> &, const SpectralField &) {
+        throw std::logic_error("backend has no device time integrator");
+    }
+    virtual void advanceDeviceState(const SpectralField &) {
+        throw std::logic_error("backend has no device time integrator");
+    }
+    virtual void downloadStateAndEvaluate(SpectralField &vorticity, SpectralField &result) {
+        evaluate(vorticity, result);
+    }
 };
 
 void backendInitialize(int &argc, char **&argv);

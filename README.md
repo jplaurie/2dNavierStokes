@@ -314,7 +314,8 @@ src/
   fftw_utils.cpp/.hpp         base-grid FFTW transforms for I/O
   solver.cpp/.hpp             forcing, linear operator, and time stepping
   integrator.hpp              shared CPU/CUDA integration formulas
-  output.cpp/.hpp             diagnostics, snapshots, and checkpoints
+  diagnostics.cpp             spectra, fluxes, and forcing records
+  output.cpp/.hpp             snapshots, checkpoints, and restart loading
   output_transaction.cpp      atomic output recovery and run history
   backend.hpp                 common nonlinear-backend interface
   backend_cpu.cpp             FFTW/OpenMP advection backend
@@ -323,6 +324,7 @@ src/
 examples/
   quickstart.params           small reproducible example
 tests/
+  parameters.cpp              parameter parsing and validation tests
   numerics.cpp                numerical unit tests
   regression.py               output, restart, and backend regression tests
 scripts/
@@ -331,9 +333,16 @@ scripts/
   movie_*.py                  MP4/GIF field, spectrum, and flux movies
 ```
 
-The `Solver` owns the shared simulation state and delegates only nonlinear
-advection to the selected backend. This keeps the CPU, MPI, and CUDA programs
-on the same parameter, forcing, integration, diagnostic, and restart paths.
+Configuration text is converted at the input boundary into typed values such
+as `Integrator` and `ForcingProfile`. Parsing, assignment, and cross-parameter
+validation are separate steps, so the numerical code never interprets raw
+configuration strings.
+
+The `Solver` owns the shared simulation state and delegates nonlinear
+advection—and, for CUDA, device-resident time stepping—to the selected backend.
+Named spectral components describe the four physical fields used to evaluate
+the Jacobian consistently on CPU, MPI, and CUDA. All executables otherwise use
+the same parameter, forcing, integration, diagnostic, and restart paths.
 
 ## License and citation
 

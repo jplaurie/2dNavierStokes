@@ -30,6 +30,18 @@ __host__ __device__ inline cufftDoubleComplex operator*(double a, cufftDoubleCom
 #include <string>
 
 namespace {
+#ifdef NS2D_CUDA_MIXED
+using TransformComplex = cufftComplex;
+using TransformReal = float;
+constexpr cufftType inverseTransformType = CUFFT_C2R;
+constexpr cufftType forwardTransformType = CUFFT_R2C;
+#else
+using TransformComplex = cufftDoubleComplex;
+using TransformReal = double;
+constexpr cufftType inverseTransformType = CUFFT_Z2D;
+constexpr cufftType forwardTransformType = CUFFT_D2Z;
+#endif
+
 void cudaCheck(cudaError_t status, const char *operation) {
     if (status != cudaSuccess)
         throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
@@ -40,7 +52,7 @@ void cufftCheck(cufftResult status, const char *operation) {
                                  std::to_string(static_cast<int>(status)) + ")");
 }
 
-__global__ void populateComponents(const cufftDoubleComplex *input, cufftDoubleComplex *fields,
+__global__ void populateComponents(const cufftDoubleComplex *input, TransformComplex *fields,
                                    std::size_t ny, std::size_t nxf, std::size_t my, std::size_t mxf,
                                    double lx, double ly) {
     const std::size_t flat = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -49,10 +61,10 @@ __global__ void populateComponents(const cufftDoubleComplex *input, cufftDoubleC
         return;
     const std::size_t py = flat / mxf;
     const std::size_t x = flat % mxf;
-    cufftDoubleComplex *vorticityX = fields;
-    cufftDoubleComplex *streamfunctionY = fields + paddedCount;
-    cufftDoubleComplex *vorticityY = fields + 2 * paddedCount;
-    cufftDoubleComplex *streamfunctionX = fields + 3 * paddedCount;
+    TransformComplex *vorticityX = fields;
+    TransformComplex *streamfunctionY = fields + paddedCount;
+    TransformComplex *vorticityY = fields + 2 * paddedCount;
+    TransformComplex *streamfunctionX = fields + 3 * paddedCount;
     long kyIndex = 0;
     std::size_t y = 0;
     bool retained = x < nxf;
@@ -66,10 +78,10 @@ __global__ void populateComponents(const cufftDoubleComplex *input, cufftDoubleC
         retained = false;
     }
     if (!retained) {
-        vorticityX[flat] = {0.0, 0.0};
-        streamfunctionY[flat] = {0.0, 0.0};
-        vorticityY[flat] = {0.0, 0.0};
-        streamfunctionX[flat] = {0.0, 0.0};
+        vorticityX[flat] = {0, 0};
+        streamfunctionY[flat] = {0, 0};
+        vorticityY[flat] = {0, 0};
+        streamfunctionX[flat] = {0, 0};
         return;
     }
     constexpr double twoPi = 6.283185307179586476925286766559;
@@ -78,7 +90,8 @@ __global__ void populateComponents(const cufftDoubleComplex *input, cufftDoubleC
     const double k2 = kx * kx + ky * ky;
     const cufftDoubleComplex source = input[y * nxf + x];
     const auto multiplyByImaginary = [source](double factor) {
-        return cufftDoubleComplex{-source.y * factor, source.x * factor};
+        return TransformComplex{static_cast<TransformReal>(-source.y * factor),
+                                static_cast<TransformReal>(source.x * factor)};
     };
     vorticityX[flat] = multiplyByImaginary(kx);
     streamfunctionY[flat] = multiplyByImaginary(k2 == 0.0 ? 0.0 : -ky / k2);
@@ -86,18 +99,19 @@ __global__ void populateComponents(const cufftDoubleComplex *input, cufftDoubleC
     streamfunctionX[flat] = multiplyByImaginary(k2 == 0.0 ? 0.0 : -kx / k2);
 }
 
-__global__ void multiplyFields(const double *fields, double *product, std::size_t count) {
+__global__ void multiplyFields(const TransformReal *fields, TransformReal *product,
+                               std::size_t count) {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count)
         return;
-    const double vorticityX = fields[index];
-    const double streamfunctionY = fields[count + index];
-    const double vorticityY = fields[2 * count + index];
-    const double streamfunctionX = fields[3 * count + index];
+    const TransformReal vorticityX = fields[index];
+    const TransformReal streamfunctionY = fields[count + index];
+    const TransformReal vorticityY = fields[2 * count + index];
+    const TransformReal streamfunctionX = fields[3 * count + index];
     product[index] = vorticityX * streamfunctionY - vorticityY * streamfunctionX;
 }
 
-__global__ void extractModes(const cufftDoubleComplex *padded, cufftDoubleComplex *result,
+__global__ void extractModes(const TransformComplex *padded, cufftDoubleComplex *result,
                              std::size_t ny, std::size_t nxf, std::size_t my, std::size_t mxf,
                              double scale) {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -109,8 +123,9 @@ __global__ void extractModes(const cufftDoubleComplex *padded, cufftDoubleComple
         y < ny / 2 ? static_cast<long>(y) : static_cast<long>(y) - static_cast<long>(ny);
     const std::size_t py = ky >= 0 ? static_cast<std::size_t>(ky)
                                    : static_cast<std::size_t>(static_cast<long>(my) + ky);
-    const cufftDoubleComplex value = padded[py * mxf + x];
-    result[index] = {value.x * scale, value.y * scale};
+    const TransformComplex value = padded[py * mxf + x];
+    result[index] = {static_cast<double>(value.x) * scale,
+                     static_cast<double>(value.y) * scale};
 }
 
 template <class T> class DeviceBuffer {
@@ -229,9 +244,10 @@ class CudaBackend final : public NonlinearBackend {
         int dimensions[] = {static_cast<int>(parameters.my()), static_cast<int>(parameters.mx())};
         cufftCheck(cufftPlanMany(inverse_.address(), 2, dimensions, nullptr, 1,
                                  static_cast<int>(paddedCount_), nullptr, 1,
-                                 static_cast<int>(realCount_), CUFFT_Z2D, 4),
+                                 static_cast<int>(realCount_), inverseTransformType, 4),
                    "create batched inverse plan");
-        cufftCheck(cufftPlan2d(forward_.address(), dimensions[0], dimensions[1], CUFFT_D2Z),
+        cufftCheck(cufftPlan2d(forward_.address(), dimensions[0], dimensions[1],
+                               forwardTransformType),
                    "create forward plan");
     }
 
@@ -383,13 +399,23 @@ class CudaBackend final : public NonlinearBackend {
             vorticity, fields_.data(), parameters_.ny, parameters_.nxf(), parameters_.my(),
             parameters_.mxf(), parameters_.lx(), parameters_.ly());
         cudaCheck(cudaGetLastError(), "launch spectral derivative kernel");
+#ifdef NS2D_CUDA_MIXED
+        cufftCheck(cufftExecC2R(inverse_.get(), fields_.data(), realFields_.data()),
+                   "execute batched inverse transform");
+#else
         cufftCheck(cufftExecZ2D(inverse_.get(), fields_.data(), realFields_.data()),
                    "execute batched inverse transform");
+#endif
         multiplyFields<<<blocks(realCount_), threads>>>(realFields_.data(), product_.data(),
                                                         realCount_);
         cudaCheck(cudaGetLastError(), "launch nonlinear product kernel");
+#ifdef NS2D_CUDA_MIXED
+        cufftCheck(cufftExecR2C(forward_.get(), product_.data(), paddedOutput_.data()),
+                   "execute forward transform");
+#else
         cufftCheck(cufftExecD2Z(forward_.get(), product_.data(), paddedOutput_.data()),
                    "execute forward transform");
+#endif
         extractModes<<<blocks(baseCount_), threads>>>(
             paddedOutput_.data(), output, parameters_.ny, parameters_.nxf(), parameters_.my(),
             parameters_.mxf(), 1.0 / static_cast<double>(parameters_.mx() * parameters_.my()));
@@ -409,8 +435,9 @@ class CudaBackend final : public NonlinearBackend {
     std::size_t baseCount_ = 0, paddedCount_ = 0, realCount_ = 0;
     std::size_t noiseCount_ = 0;
     bool compactNoise_ = false;
-    DeviceBuffer<cufftDoubleComplex> input_, fields_, paddedOutput_, result_;
-    DeviceBuffer<double> realFields_, product_;
+    DeviceBuffer<cufftDoubleComplex> input_, result_;
+    DeviceBuffer<TransformComplex> fields_, paddedOutput_;
+    DeviceBuffer<TransformReal> realFields_, product_;
     CufftPlan inverse_, forward_;
 };
 } // namespace
@@ -418,9 +445,15 @@ class CudaBackend final : public NonlinearBackend {
 void backendInitialize(int &, char **&) { cudaCheck(cudaFree(nullptr), "initialize CUDA"); }
 void backendFinalize() {}
 void backendAbort(int) {}
-void backendBarrier() {}
+void backendBarrier() { cudaCheck(cudaDeviceSynchronize(), "synchronize CUDA device"); }
 bool backendIsRoot() { return true; }
-const char *backendName() { return "CUDA"; }
+const char *backendName() {
+#ifdef NS2D_CUDA_MIXED
+    return "CUDA mixed (FP64 state / FP32 FFT)";
+#else
+    return "CUDA";
+#endif
+}
 std::uint64_t backendSynchronizeSeed(std::uint64_t seed) { return seed; }
 std::unique_ptr<NonlinearBackend> makeBackend(const Parameters &parameters) {
     return std::make_unique<CudaBackend>(parameters);

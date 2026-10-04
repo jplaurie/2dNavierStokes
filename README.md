@@ -4,14 +4,16 @@ A C++20 solver for the doubly periodic two-dimensional vorticity equation. It
 uses a dealiased pseudo-spectral method, supports deterministic and stochastic
 forcing, and writes restartable simulations with CSV diagnostics.
 
-Three executables share the same model, parameter format, integration methods,
+Five executables share the same model, parameter format, integration methods,
 and output format:
 
 | Executable | Backend | Use case |
 | --- | --- | --- |
+| `navier_stokes_cpu_serial` | Serial FFTW | Single-core reference and benchmarking |
 | `navier_stokes_cpu` | FFTW, with optional OpenMP | Standard shared-memory runs |
 | `navier_stokes_mpi` | FFTW-MPI, with optional OpenMP | Distributed-memory runs |
-| `navier_stokes_cuda` | CUDA and cuFFT | NVIDIA GPU runs |
+| `navier_stokes_cuda` | FP64 CUDA and cuFFT | Full-double NVIDIA GPU runs |
+| `navier_stokes_cuda_mixed` | FP64 state/integration, FP32 FFT path | Faster NVIDIA GPU runs when mixed precision is acceptable |
 
 The current solver is self-contained; the original source trees are kept in
 [`archived/`](archived/) for reference.
@@ -171,7 +173,7 @@ ctest --test-dir build/release --output-on-failure
 ```
 
 CMake omits the MPI executable when MPI or FFTW-MPI is unavailable, and omits
-the CUDA executable when no CUDA compiler is found. Useful options are:
+the CUDA executables when no CUDA compiler is found. Useful options are:
 
 ```text
 -DNS2D_OPENMP=OFF
@@ -184,7 +186,50 @@ the CUDA executable when no CUDA compiler is found. Useful options are:
 `NS2D_BACKEND_TESTS` adds MPI and CUDA comparisons when those executables can
 run locally. The standard suite checks numerical kernels, outputs, restart
 recovery, and parameter handling. Convenience targets are `make cpu`,
-`make mpi`, `make cuda`, and `make test`; set `BUILD_DIR` if needed.
+`make cpu-serial`, `make mpi`, `make cuda`, `make cuda-mixed`,
+`make benchmark-backends`, and `make test`; set `BUILD_DIR` if needed.
+
+## Performance benchmark
+
+The benchmark below measures complete ETD4-B timesteps on square grids. Each timestep contains
+four nonlinear evaluations; each one uses four inverse transforms and one forward transform on a
+3/2-padded grid. Lower time is better. Points are medians of three calibrated trials and error bars
+span the observed minimum and maximum. The speedup panel uses the serial CPU result as its 1.0
+baseline; the timing panel shows the unnormalized timestep times.
+
+![CPU, MPI, and CUDA backend scaling](benchmarks/backend_scaling.svg)
+
+These results were measured on an AMD Ryzen 9 9900X and NVIDIA GeForce RTX 5070 using one serial
+CPU core, 12 OpenMP threads, 12 single-threaded MPI ranks, or one GPU:
+
+| Grid | CPU serial | CPU/OpenMP | MPI | CUDA FP64 | CUDA mixed |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 x 512 | 28.23 ms | 24.16 ms | 37.51 ms | 8.093 ms | 1.075 ms |
+| 1,024 x 1,024 | 152.4 ms | 128.3 ms | 180.5 ms | 31.15 ms | 5.248 ms |
+| 2,048 x 2,048 | 762.8 ms | 640.5 ms | 904.5 ms | 137.3 ms | 25.53 ms |
+| 4,096 x 4,096 | 4.389 s | 3.630 s | 5.251 s | 597.4 ms | 146.0 ms |
+
+At 4,096 x 4,096, OpenMP, FP64 CUDA, and mixed CUDA are respectively 1.21x, 7.35x, and 30.1x
+faster than one CPU core. For the practical comparison with the best CPU configuration, mixed
+CUDA is 24.9x faster than CPU/OpenMP and 4.1x faster than FP64 CUDA. MPI reaches 0.84x the serial
+CPU performance on this single socket because the distributed transforms and full spectral-field
+reductions add communication without providing more hardware resources. These are machine- and
+implementation-specific results.
+
+The timed region starts after process/runtime startup, FFT planning, allocation, coefficient and
+state upload, and two warm-up steps. It includes synchronization at both boundaries but excludes
+diagnostics, file output, and final GPU download. This isolates sustained timestep throughput; it
+does not claim that launching a very short GPU job is equally cheap. Raw trials, exact system
+metadata, the runner, and the plotting script are in [`benchmarks/`](benchmarks/).
+
+The mixed backend keeps the spectral state, ETD stages and coefficients, forcing, and stochastic
+increments in FP64. Only the padded derivative transforms and physical-space Jacobian product use
+FP32. The backend supports the same grid geometries, integrators, forcing profiles, output, and
+restart path as full CUDA. Across all integrators and forcing modes plus a 64-step rectangular
+ETD4 case, its largest observed absolute coefficient difference from the CPU FP64 reference was
+2.14e-9. Because turbulent trajectories are chaotic, mixed and full-FP64 runs should not be
+expected to remain trajectory-identical indefinitely; use `navier_stokes_cuda` when full-double
+nonlinear evaluation or the tightest reproducibility is required.
 
 ## Quick start
 
@@ -213,6 +258,8 @@ OMP_NUM_THREADS=4 \
   mpirun -n 2 ./build/release/navier_stokes_mpi run.params
 
 ./build/release/navier_stokes_cuda run.params
+
+./build/release/navier_stokes_cuda_mixed run.params
 ```
 
 Set `threadCount` in the parameter file to select host OpenMP threads per
@@ -309,6 +356,7 @@ examples.
 ```text
 src/
   main.cpp                    shared executable entry point
+  benchmark.cpp               warmed-up complete-timestep benchmark entry point
   parameters.cpp/.hpp         parse, validate, and record run settings
   spectral.cpp/.hpp           Fourier indexing and reality constraints
   fftw_utils.cpp/.hpp         base-grid FFTW transforms for I/O
@@ -320,7 +368,11 @@ src/
   backend.hpp                 common nonlinear-backend interface
   backend_cpu.cpp             FFTW/OpenMP advection backend
   backend_mpi.cpp             FFTW-MPI/OpenMP advection backend
-  backend_cuda.cu             CUDA/cuFFT backend and GPU time stepping
+  backend_cuda.cu             FP64 and mixed CUDA/cuFFT backends and GPU time stepping
+benchmarks/
+  run_benchmarks.py           calibrated multi-backend benchmark runner
+  plot_benchmarks.py          README plot generator
+  results.csv, system.json    raw trials and machine/build metadata
 examples/
   quickstart.params           small reproducible example
 tests/

@@ -197,9 +197,10 @@ def output(root, cpu):
     print("Output recovery, collision safety, mode availability and parameter histories passed")
 
 
-def backend(root, cpu, candidate):
+def backend(root, cpu, candidate, tolerance):
     initial = field(root / "initial.dat", 32, 48,
                     lambda x, y: math.sin(x) + .4*math.cos(2*y) + .2*math.sin(3*x-y))
+    largest_difference = 0.0
     for method in ["etd2", "etd3", "etd4", "rk2"]:
         for profile in ["disabled", "annulus", "exponential", "singleMode"]:
             settings = dict(nx=32, ny=48, aspectRatio=2, integrator=method,
@@ -212,14 +213,32 @@ def backend(root, cpu, candidate):
             comparison = parameters(root / f"candidate_{method}_{profile}", **settings)
             run(cpu, reference)
             run(candidate, comparison)
-            require(difference(checkpoint(reference, 2), checkpoint(comparison, 2)) < 2e-12,
+            error = difference(checkpoint(reference, 2), checkpoint(comparison, 2))
+            largest_difference = max(largest_difference, error)
+            require(error < tolerance,
                     f"Backend mismatch: {method}, {profile}")
             if profile == "annulus":
                 split = parameters(root / f"split_{method}", **(settings | {"numberOfSteps": 2}))
                 run(candidate, split)
                 run(candidate, split)
                 require(checkpoint(split, 2) == checkpoint(comparison, 2), f"Backend restart mismatch: {method}")
-    print("All integrators and forcing profiles agree across backends; stochastic restarts match")
+    sustained_initial = field(
+        root / "sustained_initial.dat", 96, 128,
+        lambda x, y: math.sin(x) + .3*math.cos(2*y) + .2*math.sin(3*x-y)
+                        + .1*math.cos(2*x+3*y))
+    sustained_settings = dict(nx=96, ny=128, aspectRatio=1.5, integrator="etd4",
+                              timeStep=.001, numberOfSteps=64, outputIntervalSteps=64,
+                              initialConditionFile=sustained_initial, betaPlane="true", beta=7,
+                              threadCount=2, forcingEnabled="false")
+    reference = parameters(root / "cpu_sustained", **sustained_settings)
+    comparison = parameters(root / "candidate_sustained", **sustained_settings)
+    run(cpu, reference)
+    run(candidate, comparison)
+    error = difference(checkpoint(reference), checkpoint(comparison))
+    largest_difference = max(largest_difference, error)
+    require(error < tolerance, "Backend mismatch in sustained rectangular ETD4 case")
+    print("All integrators and forcing profiles agree across backends; stochastic restarts "
+          f"match (maximum absolute difference {largest_difference:.3g})")
 
 
 def main():
@@ -229,6 +248,7 @@ def main():
     parser.add_argument("--candidate")
     parser.add_argument("--mpiexec")
     parser.add_argument("--mpi-numproc-flag", default="-n")
+    parser.add_argument("--tolerance", type=float, default=2e-12)
     args = parser.parse_args()
     cpu = [args.cpu]
     candidate = [args.candidate]
@@ -241,7 +261,7 @@ def main():
         elif args.mode == "output":
             output(root, cpu)
         else:
-            backend(root, cpu, candidate)
+            backend(root, cpu, candidate, args.tolerance)
 
 
 if __name__ == "__main__":

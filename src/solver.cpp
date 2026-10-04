@@ -67,8 +67,6 @@ Solver::Solver(Parameters parameters, std::unique_ptr<NonlinearBackend> backend)
     if (parameters_.threadCount > 0)
         omp_set_num_threads(parameters_.threadCount);
 #endif
-    std::filesystem::create_directories(parameters_.dataDirectory);
-    std::filesystem::create_directories(parameters_.outputDirectory);
     buildLinearOperator();
     buildIntegrationCoefficients();
     if (parameters_.forcingEnabled) {
@@ -405,6 +403,8 @@ void Solver::initializeDeviceTimeStepping(const SpectralField &vorticity) {
 }
 
 RestartState Solver::prepareRun() {
+    std::filesystem::create_directories(parameters_.dataDirectory);
+    std::filesystem::create_directories(parameters_.outputDirectory);
     const bool recoveredFresh = backendIsRoot() && recoverOutputTransaction(parameters_);
     backendBarrier();
     RestartState state = readRestart(parameters_, baseTransform_, backendIsRoot());
@@ -429,6 +429,43 @@ RestartState Solver::prepareRun() {
     }
     initializeDeviceTimeStepping(state.vorticity);
     return state;
+}
+
+SpectralField Solver::makeBenchmarkState() const {
+    SpectralField vorticity(parameters_.spectralSize());
+    for (std::size_t y = 0; y < parameters_.ny; ++y) {
+        const long kyIndex = signedWave(y, parameters_.ny);
+        for (std::size_t x = 0; x < parameters_.nxf(); ++x) {
+            const double xWave = static_cast<double>(x);
+            const double yWave = static_cast<double>(kyIndex);
+            const double k2 = xWave * xWave + yWave * yWave;
+            if (k2 == 0.0)
+                continue;
+            const double amplitude = 0.25 / ((1.0 + k2) * (1.0 + k2));
+            const double phase = 0.37 * static_cast<double>(x) +
+                                 0.19 * static_cast<double>(kyIndex) +
+                                 0.013 * xWave * std::abs(yWave);
+            vorticity[spectralIndex(x, y, parameters_.nxf())] =
+                amplitude * Complex(std::cos(phase), std::sin(phase));
+        }
+    }
+    enforceRealityConstraints(vorticity, parameters_);
+    return vorticity;
+}
+
+double Solver::benchmark(std::uint64_t warmupSteps, std::uint64_t measuredSteps) {
+    if (measuredSteps == 0)
+        throw std::runtime_error("benchmark requires at least one measured step");
+    SpectralField vorticity = makeBenchmarkState();
+    initializeDeviceTimeStepping(vorticity);
+    for (std::uint64_t i = 0; i < warmupSteps; ++i)
+        step(vorticity);
+    backendBarrier();
+    const auto start = std::chrono::steady_clock::now();
+    for (std::uint64_t i = 0; i < measuredSteps; ++i)
+        step(vorticity);
+    backendBarrier();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 }
 
 void Solver::writeOutputFrame(const RestartState &state, DiagnosticsAverages &averages) {

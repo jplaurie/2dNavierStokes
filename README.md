@@ -4,6 +4,8 @@ A C++20 solver for the doubly periodic two-dimensional vorticity equation. It
 uses a dealiased pseudo-spectral method, supports deterministic and stochastic
 forcing, and writes restartable simulations with CSV diagnostics.
 
+Current release: `v0.3.0` (2026-10-04).
+
 Five executables share the same model, parameter format, integration methods,
 and output format:
 
@@ -395,6 +397,17 @@ advection—and, for CUDA, device-resident time stepping—to the selected backe
 Named spectral components describe the four physical fields used to evaluate
 the Jacobian consistently on CPU, MPI, and CUDA. All executables otherwise use
 the same parameter, forcing, integration, diagnostic, and restart paths.
+
+## Version history
+
+These versions were assigned retrospectively to the main development milestones;
+the dates below are the dates of the tagged commits.
+
+| Version | Date | Changes |
+| --- | --- | --- |
+| `v0.3.0` | 2026-10-04 | Added the mixed-precision CUDA path, reproducible multi-backend benchmarks and performance plots; clarified typed configuration and the CUDA implementation and expanded regression coverage. |
+| `v0.2.0` | 2026-09-16 | Refactored the shared solver, reduced CUDA transfers for stochastic forcing and added plotting, diagnostic-notebook and movie tools. |
+| `v0.1.0` | 2026-09-06 | Introduced the modern C++20 solver with shared CPU/OpenMP, MPI/OpenMP and CUDA implementations, unified builds, restartable output and numerical/regression tests. |
 
 ## License and citation
 

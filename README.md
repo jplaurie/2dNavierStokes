@@ -4,7 +4,7 @@ A C++20 solver for the doubly periodic two-dimensional vorticity equation. It
 uses a dealiased pseudo-spectral method, supports deterministic and stochastic
 forcing, and writes restartable simulations with CSV diagnostics.
 
-Current release: `v0.3.0` (2026-10-04).
+Current release: `v0.4.0` (2026-10-08).
 
 Five executables share the same model, parameter format, integration methods,
 and output format:
@@ -16,6 +16,9 @@ and output format:
 | `navier_stokes_mpi` | FFTW-MPI, with optional OpenMP | Distributed-memory runs |
 | `navier_stokes_cuda` | FP64 CUDA and cuFFT | Full-double NVIDIA GPU runs |
 | `navier_stokes_cuda_mixed` | FP64 state/integration, FP32 FFT path | Faster NVIDIA GPU runs when mixed precision is acceptable |
+
+When HDF5 is available, `ns2d_hdf5_export` converts compressed vorticity
+snapshots back to solver text fields or directly plottable gnuplot tables.
 
 The current solver is self-contained; the original source trees are kept in
 [`archived/`](archived/) for reference.
@@ -149,9 +152,10 @@ The CPU build requires:
 
 OpenMP and FFTW's threads library are optional. Python 3 enables the complete
 regression suite. MPI runs also need MPI and FFTW-MPI; CUDA runs need the NVIDIA
-CUDA Toolkit and cuFFT, plus an NVIDIA GPU at run time.
+CUDA Toolkit and cuFFT, plus an NVIDIA GPU at run time. HDF5 is optional and
+enables compressed field snapshots, HDF5 initial conditions, and the exporter.
 
-On Arch Linux, the relevant packages are typically `fftw`, `openmpi`,
+On Arch Linux, the relevant packages are typically `fftw`, `hdf5`, `openmpi`,
 `fftw-openmpi`, and `cuda`.
 
 ## Build and test
@@ -181,6 +185,7 @@ the CUDA executables when no CUDA compiler is found. Useful options are:
 -DNS2D_OPENMP=OFF
 -DNS2D_MPI=OFF
 -DNS2D_CUDA=OFF
+-DNS2D_HDF5=OFF
 -DNS2D_CUDA_ARCHITECTURES=<CUDA architecture>
 -DNS2D_BACKEND_TESTS=ON
 ```
@@ -189,7 +194,9 @@ the CUDA executables when no CUDA compiler is found. Useful options are:
 run locally. The standard suite checks numerical kernels, outputs, restart
 recovery, and parameter handling. Convenience targets are `make cpu`,
 `make cpu-serial`, `make mpi`, `make cuda`, `make cuda-mixed`,
-`make benchmark-backends`, and `make test`; set `BUILD_DIR` if needed.
+`make hdf5-export`, `make benchmark-backends`, and `make test`; set `BUILD_DIR`
+if needed. CPU validation also runs on every push and pull request through the
+GitHub Actions workflow.
 
 ## Performance benchmark
 
@@ -214,9 +221,10 @@ CPU core, 12 OpenMP threads, 12 single-threaded MPI ranks, or one GPU:
 At 4,096 x 4,096, OpenMP, FP64 CUDA, and mixed CUDA are respectively 1.21x, 7.35x, and 30.1x
 faster than one CPU core. For the practical comparison with the best CPU configuration, mixed
 CUDA is 24.9x faster than CPU/OpenMP and 4.1x faster than FP64 CUDA. MPI reaches 0.84x the serial
-CPU performance on this single socket because the distributed transforms and full spectral-field
-reductions add communication without providing more hardware resources. These are machine- and
-implementation-specific results.
+CPU performance on this single socket because the distributed transforms add communication without
+providing more hardware resources. These v0.3 measurements predate the distributed-state MPI and
+optional CUDA-graph changes in v0.4, so rerun the included benchmark before quoting current MPI or
+graph-enabled results. All measurements are machine- and implementation-specific.
 
 The timed region starts after process/runtime startup, FFT planning, allocation, coefficient and
 state upload, and two warm-up steps. It includes synchronization at both boundaries but excludes
@@ -267,7 +275,15 @@ OMP_NUM_THREADS=4 \
 Set `threadCount` in the parameter file to select host OpenMP threads per
 process; `0` uses the OpenMP runtime default. CPU and MPI FFTs use the same
 count when FFTW threads support is available. For MPI, plan for
-`ranks × threadCount` CPU cores. Only rank zero writes files.
+`ranks × threadCount` CPU cores. Spectral state, ETD coefficients, and stage
+fields remain slab-distributed; full fields are gathered to rank zero only at
+output frames. Only rank zero writes files.
+
+CUDA keeps state, ETD stages, nonlinear transforms, and forcing on the device.
+Set `cudaGraphEnabled true` to capture and replay the fixed timestep as a CUDA
+graph. This can reduce launch overhead in long production runs; leave it off
+when inspecting individual kernels or compare both settings on representative
+grids because large FFTs may dominate the timestep.
 
 ## Parameter files
 
@@ -296,15 +312,24 @@ launched.
 | `targetEnergyInjectionRate` | Positive value normalizes stochastic forcing; `0` leaves its amplitude unchanged. |
 | `randomSeed` | Reproducible 64-bit seed; `0` chooses and records a time-based seed. |
 | `writeModeDiagnostics` | Write selected Fourier modes to `modes.csv`. |
+| `fieldOutputFormat` | Physical snapshots: `text`, `hdf5`, or `both`. |
+| `hdf5CompressionLevel` | Deflate level from `0` (off) through `9`. |
+| `fftwPlanning` | FFTW planner: `estimate`, `measure`, or `patient`. |
+| `fftwWisdomFile` | Optional FFTW wisdom file to import and update. |
+| `cudaGraphEnabled` | Capture/replay the CUDA timestep on CUDA backends. |
 | `threadCount` | Host threads per process; `0` uses the OpenMP default. |
 | `overwriteOutput` | Allow replacement of an existing frame. It does not disable automatic restart. |
-| `initialConditionFile` | Optional whitespace-delimited `ny` × `nx` vorticity matrix. |
+| `initialConditionFile` | Optional text or HDF5 vorticity snapshot. |
 | `dataDirectory` | Snapshots, checkpoints, and restart metadata. |
 | `outputDirectory` | CSV diagnostics and resolved run configuration. |
 
 Booleans accept `true`/`false` or `1`/`0`. The solver writes the validated
 configuration, selected backend, and actual random seed to
 `outputDirectory/resolved_parameters.txt`.
+
+`measure` and `patient` spend more time constructing FFT plans but can improve
+repeated-transform performance. `fftwWisdomFile` persists those plans; MPI
+broadcasts imported wisdom and gathers updated wisdom before rank zero saves it.
 
 `annulus` and `exponential` are Gaussian white-in-time spectral forcing. A
 positive `targetEnergyInjectionRate` normalizes their amplitude. `singleMode`
@@ -320,6 +345,7 @@ computed after an integration step.
 | Location | Contents |
 | --- | --- |
 | `dataDirectory/vorticity_NNNNNNNN.dat` | Whitespace-delimited physical vorticity matrix (`ny` rows by `nx` columns). |
+| `dataDirectory/vorticity_NNNNNNNN.h5` | Optional physical `[ny,nx]` double dataset with grid/time metadata. |
 | `dataDirectory/checkpoint_NNNNNNNN.bin` | Binary normalized spectral state for exact restart on compatible machines. |
 | `dataDirectory/restart_state.txt` | Latest committed time, frame, grid identity, and random-generator state. |
 | `outputDirectory/diagnostics.csv` | Time, frame, energy, enstrophy, and damping rates. |
@@ -329,6 +355,20 @@ computed after an integration step.
 | `outputDirectory/forcing_summary.csv` | Forcing type, forced-mode count, and injection coefficients. |
 | `outputDirectory/forcing_spectrum.csv` | Spectral forcing amplitude for each stored mode. |
 | `outputDirectory/segments/` | Per-invocation parameter and forcing records. |
+
+HDF5 snapshots are written atomically as one file per output frame. For
+production runs, `fieldOutputFormat hdf5` avoids larger text snapshots; `both`
+is useful while validating an analysis workflow. Convert a frame back to a
+solver-compatible matrix or a gnuplot table with:
+
+```bash
+./build/release/ns2d_hdf5_export vorticity_00000010.h5 frame.dat
+./build/release/ns2d_hdf5_export vorticity_00000010.h5 frame.gnuplot \
+  --format gnuplot
+```
+
+The gnuplot columns are `x y vorticity`. HDF5 snapshots can also be passed
+directly as `initialConditionFile` when their grid and domain metadata match.
 
 If `restart_state.txt` exists, the solver resumes automatically from its
 checkpoint. `numberOfSteps` then means additional steps, CSV files are
@@ -346,10 +386,13 @@ replacement, but does not turn a detected restart into a fresh run.
 
 The [`scripts/`](scripts/) directory contains Jupyter plotting notebooks for
 vorticity, the separately reconstructed `u` and `v` velocity fields, spectra,
-fluxes, and time diagnostics. It also contains command-line MP4/GIF movie
-generators for the physical fields, spectra, and fluxes. The notebooks support
-single frames, multiple frames, and frame averages and write publication-ready
-PDF figures. Movie output supports H.264 and H.265/HEVC through ffmpeg. See
+fluxes, and time diagnostics. The physical-field tools read `.dat` snapshots
+or `.h5`/`.hdf5` snapshots directly (the latter requires Python `h5py`). It
+also contains command-line MP4/GIF movie generators for the physical fields,
+spectra, and fluxes. The notebooks support single frames, multiple frames, and
+frame averages and write publication-ready PDF figures. Movie output supports
+H.264 and H.265/HEVC through ffmpeg. Scalar diagnostics, spectra, fluxes,
+selected modes, and forcing histories remain CSV. See
 [`scripts/README.md`](scripts/README.md) for dependencies, configuration, and
 examples.
 
@@ -362,9 +405,13 @@ src/
   parameters.cpp/.hpp         parse, validate, and record run settings
   spectral.cpp/.hpp           Fourier indexing and reality constraints
   fftw_utils.cpp/.hpp         base-grid FFTW transforms for I/O
-  solver.cpp/.hpp             forcing, linear operator, and time stepping
+  solver.cpp/.hpp             forcing, linear operator, and run orchestration
+  host_stepper.hpp            shared host ETD/RK timestep orchestration
+  parallel.hpp                shared threaded index traversal
   integrator.hpp              shared CPU/CUDA integration formulas
   diagnostics.cpp             spectra, fluxes, and forcing records
+  hdf5_io.cpp/.hpp            optional HDF5 field reader/writer
+  hdf5_export.cpp             HDF5-to-field/gnuplot conversion utility
   output.cpp/.hpp             snapshots, checkpoints, and restart loading
   output_transaction.cpp      atomic output recovery and run history
   backend.hpp                 common nonlinear-backend interface
@@ -381,6 +428,7 @@ tests/
   parameters.cpp              parameter parsing and validation tests
   numerics.cpp                numerical unit tests
   regression.py               output, restart, and backend regression tests
+  hdf5_output.py              HDF5 round-trip and exporter tests
 scripts/
   ns2d_plotting.py            shared readers, styling, and velocity recovery
   *.ipynb                     physical and diagnostic PDF plotting notebooks
@@ -392,8 +440,10 @@ as `Integrator` and `ForcingProfile`. Parsing, assignment, and cross-parameter
 validation are separate steps, so the numerical code never interprets raw
 configuration strings.
 
-The `Solver` owns the shared simulation state and delegates nonlinear
-advection—and, for CUDA, device-resident time stepping—to the selected backend.
+Each backend owns its simulation state and time-integration workspace after
+initialization. CPU uses the shared host stepper, MPI retains distributed slabs,
+and CUDA keeps the complete timestep device-resident. `Solver` handles shared
+forcing, output, restart, and run orchestration.
 Named spectral components describe the four physical fields used to evaluate
 the Jacobian consistently on CPU, MPI, and CUDA. All executables otherwise use
 the same parameter, forcing, integration, diagnostic, and restart paths.
@@ -405,6 +455,7 @@ the dates below are the dates of the tagged commits.
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| `v0.4.0` | 2026-10-08 | Unified backend time stepping, distributed MPI state, FFTW planning/wisdom, optional CUDA graphs, HDF5 field I/O/export, build provenance, and CPU CI coverage. |
 | `v0.3.0` | 2026-10-04 | Added the mixed-precision CUDA path, reproducible multi-backend benchmarks and performance plots; clarified typed configuration and the CUDA implementation and expanded regression coverage. |
 | `v0.2.0` | 2026-09-16 | Refactored the shared solver, reduced CUDA transfers for stochastic forcing and added plotting, diagnostic-notebook and movie tools. |
 | `v0.1.0` | 2026-09-06 | Introduced the modern C++20 solver with shared CPU/OpenMP, MPI/OpenMP and CUDA implementations, unified builds, restartable output and numerical/regression tests. |

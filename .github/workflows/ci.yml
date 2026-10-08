@@ -1,0 +1,19 @@
+name: CPU validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install FFTW and HDF5
+        run: sudo apt-get update && sudo apt-get install -y libfftw3-dev libhdf5-dev
+      - name: Configure
+        run: cmake -S . -B build -DNS2D_MPI=OFF -DNS2D_CUDA=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

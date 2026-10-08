@@ -2,7 +2,7 @@ BUILD_DIR ?= build/release
 BUILD_TYPE ?= Release
 JOBS ?= 4
 
-.PHONY: all cpu cpu-serial mpi cuda cuda-mixed benchmark-backends test clean configure
+.PHONY: all cpu cpu-serial mpi cuda cuda-mixed hdf5-export benchmark-backends test clean configure
 
 all: configure
 	cmake --build $(BUILD_DIR) -j$(JOBS)
@@ -18,6 +18,9 @@ cpu-serial: configure
 
 cuda-mixed: configure
 	cmake --build $(BUILD_DIR) --target navier_stokes_cuda_mixed -j$(JOBS)
+
+hdf5-export: configure
+	cmake --build $(BUILD_DIR) --target ns2d_hdf5_export -j$(JOBS)
 
 benchmark-backends: configure
 	cmake --build $(BUILD_DIR) --target ns2d_benchmark_cpu_serial ns2d_benchmark_cpu \

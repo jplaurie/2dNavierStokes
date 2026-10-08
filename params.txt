@@ -24,8 +24,12 @@ targetEnergyInjectionRate 0
 randomSeed 0
 
 writeModeDiagnostics true
+fieldOutputFormat text
+hdf5CompressionLevel 0
+fftwPlanning estimate
+# fftwWisdomFile ns2d_fftw.wisdom
+cudaGraphEnabled false
 threadCount 0
 overwriteOutput true
 dataDirectory data
 outputDirectory output
-

@@ -206,6 +206,7 @@ def backend(root, cpu, candidate, tolerance):
             settings = dict(nx=32, ny=48, aspectRatio=2, integrator=method,
                             timeStep=.005, numberOfSteps=4, outputIntervalSteps=2,
                             initialConditionFile=initial, betaPlane="true", beta=7,
+                            cudaGraphEnabled="true",
                             threadCount=2, forcingEnabled=str(profile != "disabled").lower(),
                             forcingProfile=profile if profile != "disabled" else "annulus",
                             forcingWavenumber=3, forcingWidth=.6, forcingAmplitude=.02)

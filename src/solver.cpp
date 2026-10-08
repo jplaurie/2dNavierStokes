@@ -1,4 +1,5 @@
 #include "solver.hpp"
+#include "parallel.hpp"
 #include "spectral.hpp"
 
 #include <algorithm>
@@ -15,8 +16,6 @@
 #endif
 
 namespace {
-[[maybe_unused]] constexpr std::size_t parallelThreshold = 16384;
-
 SpectralField makeSpectralField(const Parameters &parameters, bool needed = true) {
     return needed ? SpectralField(parameters.spectralSize()) : SpectralField{};
 }
@@ -29,14 +28,6 @@ void requireFinite(const SpectralField &values, const char *description) {
         throw std::runtime_error(std::string(description) + " contains a non-finite coefficient");
 }
 
-template <class Operation> void forEachIndex(std::size_t count, Operation operation) {
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (count >= parallelThreshold)
-#endif
-    for (std::ptrdiff_t rawIndex = 0; rawIndex < static_cast<std::ptrdiff_t>(count); ++rawIndex)
-        operation(static_cast<std::size_t>(rawIndex));
-}
-
 std::uint64_t resolveRandomSeed(std::uint64_t configuredSeed) {
     if (configuredSeed == 0)
         configuredSeed = static_cast<std::uint64_t>(
@@ -46,22 +37,12 @@ std::uint64_t resolveRandomSeed(std::uint64_t configuredSeed) {
 } // namespace
 
 Solver::Solver(Parameters parameters, std::unique_ptr<NonlinearBackend> backend)
-    : parameters_(std::move(parameters)), backend_(std::move(backend)), baseTransform_(parameters_),
+    : parameters_(std::move(parameters)), backend_(std::move(backend)),
+      baseTransform_(std::make_unique<BaseTransform>(parameters_)),
       linearOperator_(makeSpectralField(parameters_)),
       noise_(makeSpectralField(parameters_, parameters_.usesStochasticForcing())),
-      nonlinearAtStart_(makeSpectralField(parameters_, !backend_->supportsDeviceTimeStepping())),
-      nonlinearAtStageA_(makeSpectralField(parameters_, !backend_->supportsDeviceTimeStepping())),
-      nonlinearAtStageB_(makeSpectralField(parameters_, !backend_->supportsDeviceTimeStepping() &&
-                                                            parameters_.usesStageB())),
-      nonlinearAtStageC_(makeSpectralField(parameters_, !backend_->supportsDeviceTimeStepping() &&
-                                                            parameters_.usesStageC())),
-      stageA_(makeSpectralField(parameters_, !backend_->supportsDeviceTimeStepping())),
-      stageB_(makeSpectralField(parameters_, !backend_->supportsDeviceTimeStepping() &&
-                                                 parameters_.usesStageB())),
-      stageC_(makeSpectralField(parameters_, !backend_->supportsDeviceTimeStepping() &&
-                                                 parameters_.usesStageC())),
-      diagnosticNonlinearTerm_(makeSpectralField(parameters_)),
-      forcingAmplitude_(parameters_.spectralSize()), stochasticNoiseScale_(noise_.size()),
+      diagnosticNonlinearTerm_(), forcingAmplitude_(parameters_.spectralSize()),
+      stochasticNoiseScale_(noise_.size()),
       random_(parameters_.randomSeed = resolveRandomSeed(parameters_.randomSeed)) {
 #ifdef _OPENMP
     if (parameters_.threadCount > 0)
@@ -69,14 +50,12 @@ Solver::Solver(Parameters parameters, std::unique_ptr<NonlinearBackend> backend)
 #endif
     buildLinearOperator();
     buildIntegrationCoefficients();
+    SpectralField{}.swap(linearOperator_);
     if (parameters_.forcingEnabled) {
         buildForcing();
-        // A narrow stochastic spectrum should not require a full spectral makeSpectralField to
-        // cross the PCIe bus every step. Keep the dense representation for broad
-        // spectra, where a separate scatter kernel would save little transfer.
-        if (parameters_.usesStochasticForcing() && backend_->supportsDeviceTimeStepping() &&
-            forcedIndices_.size() < noise_.size() / 2) {
-            compactDeviceNoise_ = true;
+        if (parameters_.usesStochasticForcing() &&
+            backend_->noiseLayout() == NonlinearBackend::NoiseLayout::forcedModes) {
+            compactNoise_ = true;
             SpectralField compactNoise(forcedIndices_.size());
             noise_.swap(compactNoise);
             for (std::size_t destination = 0; destination < forcedIndices_.size(); ++destination) {
@@ -281,7 +260,7 @@ void Solver::buildForcing() {
 }
 
 void Solver::generateNoise(SpectralField &noise) {
-    if (!compactDeviceNoise_)
+    if (!compactNoise_)
         std::fill(noise.begin(), noise.end(), Complex{});
     const double scale = std::sqrt(0.5);
     for (std::size_t position = 0; position < forcedIndices_.size(); ++position) {
@@ -289,10 +268,10 @@ void Solver::generateNoise(SpectralField &noise) {
         const double amplitude = forcingAmplitude_[i];
         const double real = normal_(random_);
         const double imaginary = normal_(random_);
-        noise[compactDeviceNoise_ ? position : i] =
+        noise[compactNoise_ ? position : i] =
             (amplitude * scale * stochasticNoiseScale_[i]) * Complex(real, imaginary);
     }
-    if (compactDeviceNoise_) {
+    if (compactNoise_) {
         for (const auto [destination, source] : compactNoiseRealityPairs_)
             noise[destination] = std::conj(noise[source]);
     } else {
@@ -300,54 +279,14 @@ void Solver::generateNoise(SpectralField &noise) {
     }
 }
 
-void Solver::rightHandSide(const SpectralField &input, SpectralField &output) {
-    backend_->evaluate(input, output);
-    if (parameters_.forcingEnabled && parameters_.forcingProfile == ForcingProfile::singleMode)
-        forEachIndex(output.size(), [&](std::size_t i) { output[i] += forcingAmplitude_[i]; });
-}
-
-void Solver::step(SpectralField &vorticity) {
+void Solver::step() {
     if (!noise_.empty())
         generateNoise(noise_);
-    if (backend_->supportsDeviceTimeStepping()) {
-        backend_->advanceDeviceState(noise_);
-        return;
-    }
-    const auto coefficients = coefficients_.pointers();
-    rightHandSide(vorticity, nonlinearAtStart_);
-    forEachIndex(vorticity.size(), [&](std::size_t i) {
-        stageA_[i] = integrationStageA(parameters_.integrator, parameters_.timeStep, i,
-                                       coefficients, vorticity[i], nonlinearAtStart_[i]);
-    });
-    rightHandSide(stageA_, nonlinearAtStageA_);
-    if (!nonlinearAtStageB_.empty()) {
-        forEachIndex(vorticity.size(), [&](std::size_t i) {
-            stageB_[i] = integrationStageB(parameters_.integrator, i, coefficients, vorticity[i],
-                                           nonlinearAtStart_[i], nonlinearAtStageA_[i]);
-        });
-        rightHandSide(stageB_, nonlinearAtStageB_);
-    }
-    if (!nonlinearAtStageC_.empty()) {
-        forEachIndex(vorticity.size(), [&](std::size_t i) {
-            stageC_[i] = integrationStageC(i, coefficients, vorticity[i], nonlinearAtStart_[i],
-                                           nonlinearAtStageB_[i]);
-        });
-        rightHandSide(stageC_, nonlinearAtStageC_);
-    }
-    forEachIndex(vorticity.size(), [&](std::size_t i) {
-        vorticity[i] =
-            integrationFinish(parameters_.integrator, parameters_.timeStep, i, coefficients,
-                              vorticity[i], stageA_[i], nonlinearAtStart_[i], nonlinearAtStageA_[i],
-                              nonlinearAtStageB_.empty() ? Complex{} : nonlinearAtStageB_[i],
-                              nonlinearAtStageC_.empty() ? Complex{} : nonlinearAtStageC_[i]);
-        if (!noise_.empty())
-            vorticity[i] += noise_[i];
-    });
-    enforceRealityConstraints(vorticity, parameters_);
+    backend_->advanceTimeStep(noise_);
 }
 
 void Solver::writeState(const RestartState &state) {
-    writeVorticity(parameters_, baseTransform_, state.vorticity, state.frame);
+    writeVorticity(parameters_, *baseTransform_, state.vorticity, state.time, state.frame);
     std::ostringstream randomState, distributionState;
     randomState << random_;
     distributionState << normal_;
@@ -387,19 +326,16 @@ void Solver::restoreRandomState(const RestartState &state) {
     }
 }
 
-void Solver::initializeDeviceTimeStepping(const SpectralField &vorticity) {
-    if (!backend_->supportsDeviceTimeStepping())
-        return;
-
+void Solver::initializeTimeStepping(const SpectralField &vorticity) {
     const std::vector<double> noForcing;
     const std::vector<std::size_t> noStochasticIndices;
-    backend_->initializeDeviceState(
+    backend_->initializeTimeStepping(
         coefficients_,
         parameters_.forcingEnabled && parameters_.forcingProfile == ForcingProfile::singleMode
             ? forcingAmplitude_
             : noForcing,
-        compactDeviceNoise_ ? forcedIndices_ : noStochasticIndices, vorticity);
-    coefficients_ = {}; // The device now owns the integration coefficients.
+        compactNoise_ ? forcedIndices_ : noStochasticIndices, vorticity);
+    coefficients_ = {};
 }
 
 RestartState Solver::prepareRun() {
@@ -407,7 +343,7 @@ RestartState Solver::prepareRun() {
     std::filesystem::create_directories(parameters_.outputDirectory);
     const bool recoveredFresh = backendIsRoot() && recoverOutputTransaction(parameters_);
     backendBarrier();
-    RestartState state = readRestart(parameters_, baseTransform_, backendIsRoot());
+    RestartState state = readRestart(parameters_, *baseTransform_, backendIsRoot());
     validateRunBounds(state);
     restoreRandomState(state);
 
@@ -427,7 +363,10 @@ RestartState Solver::prepareRun() {
                   << " outputIntervalSteps = " << parameters_.outputIntervalSteps
                   << "\nrandom seed = " << parameters_.randomSeed << '\n';
     }
-    initializeDeviceTimeStepping(state.vorticity);
+    initializeTimeStepping(state.vorticity);
+    if (!backendIsRoot())
+        baseTransform_.reset();
+    SpectralField{}.swap(state.vorticity);
     return state;
 }
 
@@ -457,13 +396,13 @@ double Solver::benchmark(std::uint64_t warmupSteps, std::uint64_t measuredSteps)
     if (measuredSteps == 0)
         throw std::runtime_error("benchmark requires at least one measured step");
     SpectralField vorticity = makeBenchmarkState();
-    initializeDeviceTimeStepping(vorticity);
+    initializeTimeStepping(vorticity);
     for (std::uint64_t i = 0; i < warmupSteps; ++i)
-        step(vorticity);
+        step();
     backendBarrier();
     const auto start = std::chrono::steady_clock::now();
     for (std::uint64_t i = 0; i < measuredSteps; ++i)
-        step(vorticity);
+        step();
     backendBarrier();
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 }
@@ -484,13 +423,13 @@ void Solver::run() {
     const auto start = std::chrono::steady_clock::now();
     for (std::uint64_t stepIndex = 0; stepIndex < parameters_.numberOfSteps; ++stepIndex) {
         const std::uint64_t stepNumber = stepIndex + 1;
-        step(state.vorticity);
+        step();
         state.time += parameters_.timeStep;
         if (stepNumber % parameters_.outputIntervalSteps == 0 ||
             stepNumber == parameters_.numberOfSteps) {
             ++state.frame;
-            backend_->downloadStateAndEvaluate(state.vorticity,
-                                               diagnosticNonlinearTerm_); // MPI collective
+            backend_->downloadState(state.vorticity);
+            backend_->evaluateCurrent(diagnosticNonlinearTerm_);
             if (backendIsRoot())
                 writeOutputFrame(state, averages);
         }

@@ -16,6 +16,7 @@ from ns2d_plotting import (
     read_csv,
     read_parameters,
     read_vorticity,
+    read_vorticity_metadata,
     repository_root,
     select_frames,
     use_plot_style,
@@ -77,12 +78,22 @@ def main() -> None:
         stride=args.stride,
     )
     parameters = read_parameters(args.parameters) if args.parameters.exists() else {}
-    lx, ly = domain_lengths(parameters)
+    first_metadata = read_vorticity_metadata(files[frames[0]])
+    if parameters:
+        lx, ly = domain_lengths(parameters)
+    else:
+        lx = float(first_metadata.get("length_x", 2.0 * np.pi))
+        ly = float(first_metadata.get("length_y", 2.0 * np.pi))
     extent = (0.0, lx, 0.0, ly)
     times: dict[int, float] = {}
     if args.diagnostics.exists():
         diagnostics = read_csv(args.diagnostics)
         times = {int(row["frame"]): float(row["time"]) for row in diagnostics}
+    for frame in frames:
+        if frame not in times:
+            metadata = read_vorticity_metadata(files[frame])
+            if "time" in metadata:
+                times[frame] = float(metadata["time"])
 
     names = list(QUANTITIES) if args.quantity == "all" else [args.quantity]
 

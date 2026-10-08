@@ -1,4 +1,5 @@
 #include "output.hpp"
+#include "hdf5_io.hpp"
 #include "spectral.hpp"
 
 #include <algorithm>
@@ -23,6 +24,12 @@ bool finiteSpectralField(const SpectralField &field) {
 std::filesystem::path vorticityPath(const Parameters &parameters, std::uint64_t frame) {
     std::ostringstream name;
     name << "vorticity_" << std::setw(8) << std::setfill('0') << frame << ".dat";
+    return parameters.dataDirectory / name.str();
+}
+
+std::filesystem::path hdf5VorticityPath(const Parameters &parameters, std::uint64_t frame) {
+    std::ostringstream name;
+    name << "vorticity_" << std::setw(8) << std::setfill('0') << frame << ".h5";
     return parameters.dataDirectory / name.str();
 }
 
@@ -88,7 +95,21 @@ std::ofstream numericOutput(const std::filesystem::path &path,
     return out;
 }
 
-std::vector<double> readRealField(const std::filesystem::path &path, std::size_t count) {
+std::vector<double> readRealField(const std::filesystem::path &path, const Parameters &parameters) {
+    const std::size_t count = parameters.nx * parameters.ny;
+    if (path.extension() == ".h5" || path.extension() == ".hdf5") {
+        Hdf5Field field = readHdf5Field(path);
+        if (field.nx != parameters.nx || field.ny != parameters.ny)
+            throw std::runtime_error("HDF5 initial-condition dimensions do not match nx and ny");
+        const auto differs = [](double left, double right) {
+            return std::abs(left - right) >
+                   1.e-12 * std::max({1.0, std::abs(left), std::abs(right)});
+        };
+        if (differs(field.lengthX, parameters.lx()) || differs(field.lengthY, parameters.ly()))
+            throw std::runtime_error(
+                "HDF5 initial-condition domain lengths do not match the configured domain");
+        return std::move(field.vorticity);
+    }
     std::ifstream input(path);
     if (!input)
         throw std::runtime_error("cannot open vorticity field: " + path.string());
@@ -256,8 +277,7 @@ RestartState readRestart(const Parameters &parameters, BaseTransform &transform,
         } else {
             state.time = legacyTime;
             state.frame = static_cast<std::uint64_t>(legacyFrame);
-            real = readRealField(legacyVorticityPath(parameters, legacyFrame),
-                                 parameters.nx * parameters.ny);
+            real = readRealField(legacyVorticityPath(parameters, legacyFrame), parameters);
             state.restarting = true;
             if (isRoot)
                 std::cout << "warning: importing a legacy restart without random-generator "
@@ -272,7 +292,7 @@ RestartState readRestart(const Parameters &parameters, BaseTransform &transform,
             if (isRoot)
                 std::cout << "starting from zero vorticity\n";
         } else {
-            real = readRealField(parameters.initialConditionFile, parameters.nx * parameters.ny);
+            real = readRealField(parameters.initialConditionFile, parameters);
             if (isRoot)
                 std::cout << "starting from " << parameters.initialConditionFile << '\n';
         }
@@ -300,6 +320,7 @@ void prepareOutputFiles(const Parameters &parameters, bool restarting, std::uint
                 throw std::runtime_error(path.string() + " contains frames newer than the restart");
         }
         if ((std::filesystem::exists(vorticityPath(parameters, restartFrame + 1)) ||
+             std::filesystem::exists(hdf5VorticityPath(parameters, restartFrame + 1)) ||
              std::filesystem::exists(checkpointPath(parameters, restartFrame + 1))) &&
             !parameters.overwriteOutput)
             throw std::runtime_error(
@@ -326,22 +347,32 @@ void prepareOutputFiles(const Parameters &parameters, bool restarting, std::uint
 }
 
 void writeVorticity(const Parameters &parameters, BaseTransform &transform,
-                    const SpectralField &vorticity, std::uint64_t frame) {
-    const auto path = vorticityPath(parameters, frame);
-    if (std::filesystem::exists(path) && !parameters.overwriteOutput)
-        throw std::runtime_error("refusing to overwrite vorticity snapshot: " + path.string());
+                    const SpectralField &vorticity, double time, std::uint64_t frame) {
     std::vector<double> real;
     transform.inverse(vorticity, real);
-    const auto temporary = std::filesystem::path(path.string() + ".tmp");
-    auto out = numericOutput(temporary);
-    for (std::size_t y = 0; y < parameters.ny; ++y) {
-        for (std::size_t x = 0; x < parameters.nx; ++x)
-            out << real[y * parameters.nx + x] << (x + 1 == parameters.nx ? '\n' : ' ');
+    if (parameters.fieldOutputFormat != FieldOutputFormat::hdf5) {
+        const auto path = vorticityPath(parameters, frame);
+        if (std::filesystem::exists(path) && !parameters.overwriteOutput)
+            throw std::runtime_error("refusing to overwrite vorticity snapshot: " + path.string());
+        const auto temporary = std::filesystem::path(path.string() + ".tmp");
+        auto out = numericOutput(temporary);
+        for (std::size_t y = 0; y < parameters.ny; ++y)
+            for (std::size_t x = 0; x < parameters.nx; ++x)
+                out << real[y * parameters.nx + x] << (x + 1 == parameters.nx ? '\n' : ' ');
+        out.close();
+        if (!out)
+            throw std::runtime_error("failed while writing vorticity snapshot: " + path.string());
+        std::filesystem::rename(temporary, path);
     }
-    out.close();
-    if (!out)
-        throw std::runtime_error("failed while writing vorticity snapshot: " + path.string());
-    std::filesystem::rename(temporary, path);
+    if (parameters.fieldOutputFormat != FieldOutputFormat::text) {
+        const auto path = hdf5VorticityPath(parameters, frame);
+        if (std::filesystem::exists(path) && !parameters.overwriteOutput)
+            throw std::runtime_error("refusing to overwrite HDF5 vorticity snapshot: " +
+                                     path.string());
+        const auto temporary = std::filesystem::path(path.string() + ".tmp");
+        writeHdf5Field(temporary, parameters, time, frame, real);
+        std::filesystem::rename(temporary, path);
+    }
 }
 
 void writeRestart(const Parameters &parameters, double time, std::uint64_t frame,

@@ -13,6 +13,16 @@
 namespace {
 constexpr double pi = 3.141592653589793238462643383279502884;
 
+#ifndef NS2D_VERSION
+#define NS2D_VERSION "unknown"
+#endif
+#ifndef NS2D_GIT_COMMIT
+#define NS2D_GIT_COMMIT "unknown"
+#endif
+#ifndef NS2D_GIT_DIRTY
+#define NS2D_GIT_DIRTY "unknown"
+#endif
+
 bool parseBool(const std::string &text, const std::string &key) {
     if (text == "true" || text == "1")
         return true;
@@ -62,6 +72,26 @@ ForcingProfile parseForcingProfile(const std::string &text) {
     if (text == "singleMode")
         return ForcingProfile::singleMode;
     throw std::runtime_error("forcingProfile must be annulus, exponential, or singleMode");
+}
+
+FftwPlanning parseFftwPlanning(const std::string &text) {
+    if (text == "estimate")
+        return FftwPlanning::estimate;
+    if (text == "measure")
+        return FftwPlanning::measure;
+    if (text == "patient")
+        return FftwPlanning::patient;
+    throw std::runtime_error("fftwPlanning must be estimate, measure, or patient");
+}
+
+FieldOutputFormat parseFieldOutputFormat(const std::string &text) {
+    if (text == "text")
+        return FieldOutputFormat::text;
+    if (text == "hdf5")
+        return FieldOutputFormat::hdf5;
+    if (text == "both")
+        return FieldOutputFormat::both;
+    throw std::runtime_error("fieldOutputFormat must be text, hdf5, or both");
 }
 
 struct ParameterSetting {
@@ -138,6 +168,16 @@ void applyParameter(const ParameterSetting &setting, Parameters &parameters) {
         readNumber(parameters.randomSeed);
     else if (key == "writeModeDiagnostics")
         parameters.writeModeDiagnostics = parseBool(value, key);
+    else if (key == "fieldOutputFormat")
+        parameters.fieldOutputFormat = parseFieldOutputFormat(value);
+    else if (key == "hdf5CompressionLevel")
+        readNumber(parameters.hdf5CompressionLevel);
+    else if (key == "fftwPlanning")
+        parameters.fftwPlanning = parseFftwPlanning(value);
+    else if (key == "fftwWisdomFile")
+        parameters.fftwWisdomFile = value;
+    else if (key == "cudaGraphEnabled")
+        parameters.cudaGraphEnabled = parseBool(value, key);
     else if (key == "threadCount")
         readNumber(parameters.threadCount);
     else if (key == "overwriteOutput")
@@ -192,6 +232,30 @@ const char *forcingProfileName(ForcingProfile profile) {
         return "singleMode";
     }
     throw std::logic_error("unknown forcing profile");
+}
+
+const char *fftwPlanningName(FftwPlanning planning) {
+    switch (planning) {
+    case FftwPlanning::estimate:
+        return "estimate";
+    case FftwPlanning::measure:
+        return "measure";
+    case FftwPlanning::patient:
+        return "patient";
+    }
+    throw std::logic_error("unknown FFTW planning mode");
+}
+
+const char *fieldOutputFormatName(FieldOutputFormat format) {
+    switch (format) {
+    case FieldOutputFormat::text:
+        return "text";
+    case FieldOutputFormat::hdf5:
+        return "hdf5";
+    case FieldOutputFormat::both:
+        return "both";
+    }
+    throw std::logic_error("unknown field output format");
 }
 
 Parameters readParameters(const std::filesystem::path &path) {
@@ -271,6 +335,13 @@ void validateParameters(const Parameters &parameters) {
                                  parameters.initialConditionFile.string());
     if (parameters.dataDirectory.empty() || parameters.outputDirectory.empty())
         throw std::runtime_error("output directories cannot be empty");
+    if (parameters.hdf5CompressionLevel < 0 || parameters.hdf5CompressionLevel > 9)
+        throw std::runtime_error("hdf5CompressionLevel must be between 0 and 9");
+#ifndef NS2D_HAVE_HDF5
+    if (parameters.fieldOutputFormat != FieldOutputFormat::text)
+        throw std::runtime_error(
+            "fieldOutputFormat requests HDF5, but this build has no HDF5 support");
+#endif
 }
 
 void writeParameterRecord(const Parameters &parameters, const std::string &backend,
@@ -285,9 +356,13 @@ void writeParameterRecord(const Parameters &parameters, const std::string &backe
         out << name << ' ' << value << '\n';
     };
     write("backend", backend);
+    write("solverVersion", NS2D_VERSION);
+    write("gitCommit", NS2D_GIT_COMMIT);
+    write("gitDirty", NS2D_GIT_DIRTY);
     write("nx", parameters.nx);
     write("ny", parameters.ny);
     write("aspectRatio", parameters.aspectRatio);
+    write("boundaryCondition", "periodic");
     write("domainLengthX", parameters.lx());
     write("domainLengthY", parameters.ly());
     write("timeStep", parameters.timeStep);
@@ -309,6 +384,11 @@ void writeParameterRecord(const Parameters &parameters, const std::string &backe
     write("targetEnergyInjectionRate", parameters.targetEnergyInjectionRate);
     write("randomSeed", parameters.randomSeed);
     write("writeModeDiagnostics", parameters.writeModeDiagnostics);
+    write("fieldOutputFormat", fieldOutputFormatName(parameters.fieldOutputFormat));
+    write("hdf5CompressionLevel", parameters.hdf5CompressionLevel);
+    write("fftwPlanning", fftwPlanningName(parameters.fftwPlanning));
+    write("fftwWisdomFile", parameters.fftwWisdomFile.string());
+    write("cudaGraphEnabled", parameters.cudaGraphEnabled);
     write("threadCount", parameters.threadCount);
     write("overwriteOutput", parameters.overwriteOutput);
     write("initialConditionFile", parameters.initialConditionFile.string());

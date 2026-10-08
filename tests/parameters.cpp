@@ -66,6 +66,11 @@ int main() {
                          "forcingProfile singleMode\n"
                          "forcingWavenumber 2\n"
                          "threadCount 3\n"
+                         "fieldOutputFormat text\n"
+                         "hdf5CompressionLevel 4\n"
+                         "fftwPlanning patient\n"
+                         "fftwWisdomFile plans.wisdom\n"
+                         "cudaGraphEnabled true\n"
                          "overwriteOutput true\n"
                          "dataDirectory data\n"
                          "outputDirectory output\n");
@@ -82,6 +87,11 @@ int main() {
             "forcing profile was not converted to its enum");
     require(!parameters.forcingEnabled && parameters.threadCount == 3 && parameters.overwriteOutput,
             "boolean or integer settings were not parsed");
+    require(parameters.fieldOutputFormat == FieldOutputFormat::text &&
+                parameters.hdf5CompressionLevel == 4 &&
+                parameters.fftwPlanning == FftwPlanning::patient &&
+                parameters.fftwWisdomFile == "plans.wisdom" && parameters.cudaGraphEnabled,
+            "structural runtime settings were not parsed");
 
     const auto unknownFile = temporary.path() / "unknown.params";
     writeText(unknownFile, "nx 8\nunknownSetting 1\n");
@@ -94,4 +104,9 @@ int main() {
     const auto negativeFile = temporary.path() / "negative.params";
     writeText(negativeFile, "numberOfSteps -1\n");
     requireFailure([&] { (void)readParameters(negativeFile); }, "numberOfSteps cannot be negative");
+
+    const auto compressionFile = temporary.path() / "compression.params";
+    writeText(compressionFile, "hdf5CompressionLevel 10\n");
+    requireFailure([&] { (void)readParameters(compressionFile); },
+                   "hdf5CompressionLevel must be between 0 and 9");
 }

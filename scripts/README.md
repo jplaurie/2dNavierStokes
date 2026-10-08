@@ -3,7 +3,8 @@
 These notebooks and scripts read the current solver output format directly.
 The notebooks write publication-ready PDF figures, while the command-line
 movie generators produce MP4 or GIF animations. The physical-field tools read
-the saved vorticity and recover velocity spectrally from
+vorticity snapshots in either text (`.dat`) or self-describing HDF5
+(`.h5`/`.hdf5`) form and recover velocity spectrally from
 
 ```math
 \omega=\Delta\psi,\qquad u=-\partial_y\psi,\qquad v=\partial_x\psi.
@@ -13,10 +14,11 @@ No additional velocity output from the solver is required.
 
 ## Requirements
 
-All tools require Python 3, NumPy, and Matplotlib; the notebooks additionally
-require Jupyter. PDF plots use external LaTeX by default. Set `USE_TEX=False`
-in a notebook when LaTeX is unavailable. MP4 output also requires `ffmpeg`;
-GIF output uses Matplotlib's Pillow writer.
+All tools require Python 3, NumPy, and Matplotlib; direct HDF5 input additionally
+requires `h5py`, and the notebooks require Jupyter. Install the optional Python
+reader with `python -m pip install h5py`. PDF plots use external LaTeX by
+default. Set `USE_TEX=False` in a notebook when LaTeX is unavailable. MP4
+output also requires `ffmpeg`; GIF output uses Matplotlib's Pillow writer.
 
 Paths default to `data/`, `output/`, and `figures/`. The quick-start example
 uses `data/quickstart_modern/` and `output/quickstart_modern/`, so set those
@@ -79,6 +81,26 @@ It uses one global color scale by default; `--color-scale first` avoids the
 all-frame pre-scan and `--color-scale dynamic` rescales every frame.  Set the
 output suffix to `.gif` to use the Pillow writer; `--codec` is then ignored.
 
+When the same frame exists as both `.dat` and `.h5`, the plotting tools choose
+the text file to preserve compatibility on systems without `h5py`. If only an
+HDF5 snapshot is present, its stored domain lengths and time are used when the
+parameter or diagnostics files are absent.
+
+## HDF5 conversion and CSV diagnostics
+
+The compiled converter turns a vorticity HDF5 snapshot back into the solver's
+text layout or into `x y vorticity` columns for other plotting programs:
+
+```bash
+./build/release/ns2d_hdf5_export vorticity_00000010.h5 frame.dat
+./build/release/ns2d_hdf5_export \
+    vorticity_00000010.h5 frame.gnuplot --format gnuplot
+```
+
+HDF5 is limited to physical vorticity snapshots. `diagnostics.csv`,
+`spectra.csv`, `fluxes.csv`, optional `modes.csv`, and forcing histories remain
+ordinary CSV files and continue to use the existing readers.
+
 ## File summary
 
 | Script | Output |
@@ -91,5 +113,5 @@ output suffix to `.gif` to use the Pillow writer; `--codec` is then ignored.
 | `movie_spectra.py` | Energy/enstrophy spectrum MP4/GIF |
 | `movie_fluxes.py` | Energy/enstrophy flux MP4/GIF |
 
-`ns2d_plotting.py` contains the shared readers, frame selection, velocity
-reconstruction, plotting style, and animation writer.
+`ns2d_plotting.py` contains the shared text/HDF5 readers, frame selection,
+velocity reconstruction, plotting style, and animation writer.

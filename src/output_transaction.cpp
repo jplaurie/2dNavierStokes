@@ -11,11 +11,12 @@
 namespace {
 constexpr std::array csvNames{"diagnostics.csv", "spectra.csv", "fluxes.csv", "modes.csv"};
 
-std::array<std::filesystem::path, 2> frameFiles(const Parameters &parameters, std::uint64_t frame) {
+std::array<std::filesystem::path, 3> frameFiles(const Parameters &parameters, std::uint64_t frame) {
     std::ostringstream suffix;
     suffix << std::setw(8) << std::setfill('0') << frame;
     return {parameters.dataDirectory / ("vorticity_" + suffix.str() + ".dat"),
-            parameters.dataDirectory / ("checkpoint_" + suffix.str() + ".bin")};
+            parameters.dataDirectory / ("checkpoint_" + suffix.str() + ".bin"),
+            parameters.dataDirectory / ("vorticity_" + suffix.str() + ".h5")};
 }
 
 std::filesystem::path appended(const std::filesystem::path &path, const char *suffix) {
@@ -44,7 +45,8 @@ struct Journal {
     std::uint64_t previousFrame{};
     std::array<bool, 4> csvExisted{};
     std::array<std::uintmax_t, 4> csvSizes{};
-    std::array<bool, 2> frameExisted{};
+    std::size_t frameFileCount = 3;
+    std::array<bool, 3> frameExisted{};
 };
 
 Journal readJournal(const Parameters &parameters) {
@@ -53,16 +55,17 @@ Journal readJournal(const Parameters &parameters) {
     Journal journal;
     if (!(in >> format >> std::quoted(directory) >> journal.frame >> journal.previousMetadata >>
           journal.previousFrame) ||
-        format != "ns2d_output_transaction_v1")
+        (format != "ns2d_output_transaction_v1" && format != "ns2d_output_transaction_v2"))
         throw std::runtime_error("malformed output transaction journal");
+    journal.frameFileCount = format == "ns2d_output_transaction_v1" ? 2 : 3;
     if (std::filesystem::canonical(parameters.outputDirectory) != std::filesystem::path(directory))
         throw std::runtime_error(
             "recover the interrupted run using its original outputDirectory: " + directory);
     for (std::size_t i = 0; i < csvNames.size(); ++i)
         if (!(in >> journal.csvExisted[i] >> journal.csvSizes[i]))
             throw std::runtime_error("malformed CSV offsets in output transaction journal");
-    for (auto &existed : journal.frameExisted)
-        if (!(in >> existed))
+    for (std::size_t i = 0; i < journal.frameFileCount; ++i)
+        if (!(in >> journal.frameExisted[i]))
             throw std::runtime_error("malformed frame files in output transaction journal");
     if (!(in >> std::ws).eof())
         throw std::runtime_error("unexpected data in output transaction journal");
@@ -104,7 +107,7 @@ bool recoverOutputTransaction(const Parameters &parameters) {
             std::filesystem::remove(path);
     }
     const auto files = frameFiles(parameters, journal.frame);
-    for (std::size_t i = 0; i < files.size(); ++i) {
+    for (std::size_t i = 0; i < journal.frameFileCount; ++i) {
         const auto backup = appended(files[i], ".previous");
         if (std::filesystem::exists(backup))
             std::filesystem::rename(backup, files[i]);
@@ -146,7 +149,7 @@ void beginOutputTransaction(const Parameters &parameters, std::uint64_t frame) {
     }
     const auto temporary = parameters.dataDirectory / "output_transaction.tmp";
     std::ofstream out(temporary);
-    out << "ns2d_output_transaction_v1\n"
+    out << "ns2d_output_transaction_v2\n"
         << std::quoted(std::filesystem::canonical(parameters.outputDirectory).string()) << '\n'
         << journal.frame << ' ' << journal.previousMetadata << ' ' << journal.previousFrame << '\n';
     for (std::size_t i = 0; i < csvNames.size(); ++i)

@@ -23,6 +23,10 @@ targetEnergyInjectionRate 0
 randomSeed 123456
 
 writeModeDiagnostics true
+fieldOutputFormat text
+hdf5CompressionLevel 0
+fftwPlanning estimate
+cudaGraphEnabled false
 threadCount 1
 overwriteOutput false
 dataDirectory data/quickstart_modern

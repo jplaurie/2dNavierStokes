@@ -1,20 +1,44 @@
 cmake_minimum_required(VERSION 3.20)
-project(NavierStokes2D VERSION 0.3.0 LANGUAGES CXX)
+project(NavierStokes2D VERSION 0.4.0 LANGUAGES C CXX)
+
+find_package(Git QUIET)
+set(NS2D_GIT_COMMIT "unknown")
+set(NS2D_GIT_DIRTY "unknown")
+if(Git_FOUND)
+  execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE NS2D_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE NS2D_GIT_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(NS2D_GIT_STATUS STREQUAL "")
+    set(NS2D_GIT_DIRTY "false")
+  else()
+    set(NS2D_GIT_DIRTY "true")
+  endif()
+endif()
 
 option(NS2D_OPENMP "Enable OpenMP and threaded FFTW" ON)
 option(NS2D_MPI "Build the hybrid MPI/OpenMP backend" ON)
 option(NS2D_CUDA "Build the CUDA/cuFFT backend" ON)
+option(NS2D_HDF5 "Enable optional HDF5 field snapshots and exporter" ON)
 option(NS2D_BACKEND_TESTS "Run MPI/CUDA integration tests (requires runtime access)" OFF)
 set(NS2D_CUDA_ARCHITECTURES "" CACHE STRING "Optional CUDA architecture override")
 
 find_path(FFTW_INCLUDE_DIR fftw3.h REQUIRED)
 find_library(FFTW_LIBRARY NAMES fftw3 REQUIRED)
 find_library(FFTW_THREADS_LIBRARY NAMES fftw3_threads)
+if(NS2D_HDF5)
+  find_package(HDF5 COMPONENTS C QUIET)
+endif()
 
 set(NS2D_COMMON_SOURCES
     src/parameters.cpp
     src/fftw_utils.cpp
     src/spectral.cpp
+    src/hdf5_io.cpp
     src/diagnostics.cpp
     src/output.cpp
     src/output_transaction.cpp
@@ -24,6 +48,16 @@ add_library(ns2d_common ${NS2D_COMMON_SOURCES})
 target_include_directories(ns2d_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${FFTW_INCLUDE_DIR})
 target_link_libraries(ns2d_common PUBLIC ${FFTW_LIBRARY})
 target_compile_features(ns2d_common PUBLIC cxx_std_20)
+target_compile_definitions(ns2d_common PUBLIC
+  NS2D_VERSION="${PROJECT_VERSION}" NS2D_GIT_COMMIT="${NS2D_GIT_COMMIT}"
+  NS2D_GIT_DIRTY="${NS2D_GIT_DIRTY}")
+if(NS2D_HDF5 AND HDF5_FOUND)
+  target_include_directories(ns2d_common PUBLIC ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(ns2d_common PUBLIC ${HDF5_LIBRARIES})
+  target_compile_definitions(ns2d_common PUBLIC NS2D_HAVE_HDF5=1)
+elseif(NS2D_HDF5)
+  message(WARNING "HDF5 not found; HDF5 field output and exporter will not be available")
+endif()
 
 if(NS2D_OPENMP)
   find_package(OpenMP)
@@ -39,6 +73,14 @@ if(NS2D_OPENMP AND OpenMP_CXX_FOUND)
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${FFTW_INCLUDE_DIR})
   target_link_libraries(ns2d_common_serial PUBLIC ${FFTW_LIBRARY})
   target_compile_features(ns2d_common_serial PUBLIC cxx_std_20)
+  target_compile_definitions(ns2d_common_serial PUBLIC
+    NS2D_VERSION="${PROJECT_VERSION}" NS2D_GIT_COMMIT="${NS2D_GIT_COMMIT}"
+    NS2D_GIT_DIRTY="${NS2D_GIT_DIRTY}")
+  if(NS2D_HDF5 AND HDF5_FOUND)
+    target_include_directories(ns2d_common_serial PUBLIC ${HDF5_INCLUDE_DIRS})
+    target_link_libraries(ns2d_common_serial PUBLIC ${HDF5_LIBRARIES})
+    target_compile_definitions(ns2d_common_serial PUBLIC NS2D_HAVE_HDF5=1)
+  endif()
   set(NS2D_SERIAL_COMMON ns2d_common_serial)
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -75,6 +117,14 @@ add_executable(ns2d_benchmark_cpu src/benchmark.cpp src/backend_cpu.cpp)
 configure_host_target(ns2d_benchmark_cpu)
 add_executable(ns2d_benchmark_cpu_serial src/benchmark.cpp src/backend_cpu.cpp)
 configure_serial_target(ns2d_benchmark_cpu_serial)
+
+if(NS2D_HDF5 AND HDF5_FOUND)
+  add_executable(ns2d_hdf5_export src/hdf5_export.cpp)
+  target_link_libraries(ns2d_hdf5_export PRIVATE ns2d_common)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(ns2d_hdf5_export PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endif()
 if(NOT FFTW_THREADS_LIBRARY)
   message(WARNING "FFTW threads library not found; CPU FFT plans remain single-threaded")
 endif()
@@ -146,6 +196,12 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/regression.py ${check}
         --cpu $<TARGET_FILE:navier_stokes_cpu>)
     endforeach()
+    if(TARGET ns2d_hdf5_export)
+      add_test(NAME hdf5_output COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/hdf5_output.py
+        --cpu $<TARGET_FILE:navier_stokes_cpu>
+        --exporter $<TARGET_FILE:ns2d_hdf5_export>)
+    endif()
     if(NS2D_BACKEND_TESTS)
       foreach(backend IN ITEMS mpi cuda cuda_mixed)
         if(TARGET navier_stokes_${backend})

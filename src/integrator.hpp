@@ -25,6 +25,7 @@ struct IntegrationCoefficients {
     using Field = std::vector<std::complex<double>>;
     Field e1, e2, q1, q2, q3, q4, q5, f1, f2, f3;
 
+    auto fields() { return std::array{&e1, &e2, &q1, &q2, &q3, &q4, &q5, &f1, &f2, &f3}; }
     auto fields() const { return std::array{&e1, &e2, &q1, &q2, &q3, &q4, &q5, &f1, &f2, &f3}; }
     CoefficientPointers<std::complex<double>> pointers() const {
         return {e1.data(), e2.data(), q1.data(), q2.data(), q3.data(),

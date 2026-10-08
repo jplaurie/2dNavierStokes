@@ -29,6 +29,10 @@ template <class T> struct FftwAllocator {
 using FftwSpectralField = std::vector<Complex, FftwAllocator<Complex>>;
 using FftwRealField = std::vector<double, FftwAllocator<double>>;
 
+void configureFftw(const Parameters &parameters, bool importWisdom = true);
+void saveFftwWisdom();
+[[nodiscard]] unsigned fftwPlanningFlags();
+
 class FftwPlan {
   public:
     FftwPlan() = default;

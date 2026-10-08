@@ -12,7 +12,52 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-FRAME_PATTERN = re.compile(r"vorticity_(\d+)\.dat$")
+FRAME_PATTERN = re.compile(r"vorticity_(\d+)\.(dat|h5|hdf5)$", re.IGNORECASE)
+HDF5_SUFFIXES = {".h5", ".hdf5"}
+
+
+def _import_h5py():
+    """Import the optional HDF5 reader only when an HDF5 file is requested."""
+    try:
+        import h5py
+    except ImportError as error:
+        raise ImportError(
+            "reading vorticity HDF5 snapshots requires h5py; install it with "
+            "'python -m pip install h5py', or convert the snapshot with "
+            "ns2d_hdf5_export"
+        ) from error
+    return h5py
+
+
+def _validated_hdf5_metadata(stream, path: Path) -> dict[str, int | float]:
+    """Validate the solver HDF5 schema and return its scalar metadata."""
+    file_format = stream.attrs.get("format", "")
+    if isinstance(file_format, bytes):
+        file_format = file_format.decode("utf-8")
+    if file_format != "ns2d_vorticity_v1":
+        raise ValueError(
+            f"{path} uses unsupported HDF5 format {file_format!r}; "
+            "expected 'ns2d_vorticity_v1'"
+        )
+    if "vorticity" not in stream:
+        raise ValueError(f"{path} does not contain the /vorticity dataset")
+    dataset = stream["vorticity"]
+    if dataset.ndim != 2:
+        raise ValueError(f"{path} /vorticity is not a two-dimensional dataset")
+    ny, nx = dataset.shape
+    saved_nx = int(stream.attrs.get("nx", nx))
+    saved_ny = int(stream.attrs.get("ny", ny))
+    if (saved_ny, saved_nx) != (ny, nx):
+        raise ValueError(
+            f"{path} dimensions ({ny}, {nx}) disagree with its nx/ny attributes "
+            f"({saved_ny}, {saved_nx})"
+        )
+    metadata: dict[str, int | float] = {"nx": saved_nx, "ny": saved_ny}
+    for key in ("frame", "time", "length_x", "length_y"):
+        if key in stream.attrs:
+            value = stream.attrs[key]
+            metadata[key] = int(value) if key == "frame" else float(value)
+    return metadata
 
 
 def repository_root() -> Path:
@@ -67,27 +112,51 @@ def domain_lengths(parameters: dict[str, str]) -> tuple[float, float]:
 
 
 def discover_vorticity(data_directory: str | Path) -> dict[int, Path]:
-    """Map saved frame numbers to vorticity snapshot paths."""
+    """Map frame numbers to text or HDF5 snapshots, preferring text duplicates."""
     files: dict[int, Path] = {}
-    for path in sorted(Path(data_directory).glob("vorticity_*.dat")):
-        match = FRAME_PATTERN.search(path.name)
+    priority = {".hdf5": 0, ".h5": 1, ".dat": 2}
+    for path in sorted(Path(data_directory).glob("vorticity_*.*")):
+        match = FRAME_PATTERN.fullmatch(path.name)
         if match:
-            files[int(match.group(1))] = path
+            frame = int(match.group(1))
+            current = files.get(frame)
+            if current is None or priority[path.suffix.lower()] > priority[
+                current.suffix.lower()
+            ]:
+                files[frame] = path
     if not files:
         raise FileNotFoundError(
-            f"no vorticity_XXXXXXXX.dat files found in {data_directory}"
+            f"no vorticity_XXXXXXXX.dat, .h5, or .hdf5 files found in "
+            f"{data_directory}"
         )
     return files
 
 
 def read_vorticity(path: str | Path) -> np.ndarray:
     """Load a solver snapshot as a real array with shape ``(ny, nx)``."""
-    values = np.loadtxt(path, dtype=float)
+    snapshot = Path(path)
+    if snapshot.suffix.lower() in HDF5_SUFFIXES:
+        h5py = _import_h5py()
+        with h5py.File(snapshot, "r") as stream:
+            _validated_hdf5_metadata(stream, snapshot)
+            values = np.asarray(stream["vorticity"], dtype=float)
+    else:
+        values = np.loadtxt(snapshot, dtype=float)
     if values.ndim != 2:
-        raise ValueError(f"{path} is not a rectangular two-dimensional snapshot")
+        raise ValueError(f"{snapshot} is not a rectangular two-dimensional snapshot")
     if not np.all(np.isfinite(values)):
-        raise ValueError(f"{path} contains a non-finite value")
+        raise ValueError(f"{snapshot} contains a non-finite value")
     return values
+
+
+def read_vorticity_metadata(path: str | Path) -> dict[str, int | float]:
+    """Return self-describing HDF5 metadata, or an empty mapping for text."""
+    snapshot = Path(path)
+    if snapshot.suffix.lower() not in HDF5_SUFFIXES:
+        return {}
+    h5py = _import_h5py()
+    with h5py.File(snapshot, "r") as stream:
+        return _validated_hdf5_metadata(stream, snapshot)
 
 
 def velocity_from_vorticity(

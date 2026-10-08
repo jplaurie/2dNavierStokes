@@ -38,7 +38,7 @@ void writeRunRecords(const Parameters &parameters, const std::string &backend, d
 RestartState readRestart(const Parameters &parameters, BaseTransform &transform, bool isRoot);
 void prepareOutputFiles(const Parameters &parameters, bool restarting, std::uint64_t restartFrame);
 void writeVorticity(const Parameters &parameters, BaseTransform &transform,
-                    const SpectralField &vorticity, std::uint64_t frame);
+                    const SpectralField &vorticity, double time, std::uint64_t frame);
 double writeDiagnostics(const Parameters &parameters, double time, std::uint64_t frame,
                         const SpectralField &vorticity, const SpectralField &nonlinearTerm,
                         DiagnosticsAverages &averages);

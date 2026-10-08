@@ -18,6 +18,7 @@ __host__ __device__ inline cufftDoubleComplex operator*(double a, cufftDoubleCom
 }
 
 #include "backend.hpp"
+#include "fftw_utils.hpp"
 #include "spectral.hpp"
 
 #include <array>
@@ -124,8 +125,7 @@ __global__ void extractModes(const TransformComplex *padded, cufftDoubleComplex 
     const std::size_t py = ky >= 0 ? static_cast<std::size_t>(ky)
                                    : static_cast<std::size_t>(static_cast<long>(my) + ky);
     const TransformComplex value = padded[py * mxf + x];
-    result[index] = {static_cast<double>(value.x) * scale,
-                     static_cast<double>(value.y) * scale};
+    result[index] = {static_cast<double>(value.x) * scale, static_cast<double>(value.y) * scale};
 }
 
 template <class T> class DeviceBuffer {
@@ -160,6 +160,18 @@ class CufftPlan {
 
   private:
     cufftHandle plan_ = 0;
+};
+
+class CudaStream {
+  public:
+    CudaStream() { cudaCheck(cudaStreamCreate(&stream_), "create CUDA integration stream"); }
+    ~CudaStream() { cudaStreamDestroy(stream_); }
+    CudaStream(const CudaStream &) = delete;
+    CudaStream &operator=(const CudaStream &) = delete;
+    [[nodiscard]] cudaStream_t get() const { return stream_; }
+
+  private:
+    cudaStream_t stream_ = nullptr;
 };
 
 struct DeviceStages {
@@ -223,7 +235,8 @@ __global__ void integrateStage(IntegrationStage stage, Integrator method, double
 
 class CudaBackend final : public NonlinearBackend {
   public:
-    explicit CudaBackend(const Parameters &parameters) : parameters_(parameters) {
+    explicit CudaBackend(const Parameters &parameters)
+        : parameters_(parameters), graphEnabled_(parameters.cudaGraphEnabled) {
         static_assert(sizeof(Complex) == sizeof(cufftDoubleComplex));
         if (parameters.mx() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
             parameters.my() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
@@ -246,16 +259,36 @@ class CudaBackend final : public NonlinearBackend {
                                  static_cast<int>(paddedCount_), nullptr, 1,
                                  static_cast<int>(realCount_), inverseTransformType, 4),
                    "create batched inverse plan");
-        cufftCheck(cufftPlan2d(forward_.address(), dimensions[0], dimensions[1],
-                               forwardTransformType),
-                   "create forward plan");
+        cufftCheck(
+            cufftPlan2d(forward_.address(), dimensions[0], dimensions[1], forwardTransformType),
+            "create forward plan");
+        cufftCheck(cufftSetStream(inverse_.get(), stream_.get()),
+                   "attach inverse transforms to integration stream");
+        cufftCheck(cufftSetStream(forward_.get(), stream_.get()),
+                   "attach forward transform to integration stream");
     }
 
-    bool supportsDeviceTimeStepping() const override { return true; }
+    ~CudaBackend() override {
+        if (graphExec_)
+            cudaGraphExecDestroy(graphExec_);
+        if (graph_)
+            cudaGraphDestroy(graph_);
+    }
 
-    void initializeDeviceState(const IntegrationCoefficients &c, const std::vector<double> &forcing,
-                               const std::vector<std::size_t> &stochasticIndices,
-                               const SpectralField &vorticity) override {
+    NoiseLayout noiseLayout() const override { return NoiseLayout::forcedModes; }
+
+    void initializeTimeStepping(const IntegrationCoefficients &c,
+                                const std::vector<double> &forcing,
+                                const std::vector<std::size_t> &stochasticIndices,
+                                const SpectralField &vorticity) override {
+        if (graphExec_) {
+            cudaGraphExecDestroy(graphExec_);
+            graphExec_ = nullptr;
+        }
+        if (graph_) {
+            cudaGraphDestroy(graph_);
+            graph_ = nullptr;
+        }
         const auto arrays = c.fields();
         for (std::size_t i = 0; i < arrays.size(); ++i) {
             coefficientBuffers_[i].allocate(arrays[i]->size());
@@ -303,16 +336,35 @@ class CudaBackend final : public NonlinearBackend {
             }
         }
         uploadState(vorticity);
+        if (graphEnabled_) {
+            // cuFFT may perform one-time setup on first execution, which is not
+            // permitted while a stream is being captured.
+            evaluateDevice(input_.data(), result_.data());
+            cudaCheck(cudaStreamSynchronize(stream_.get()), "warm CUDA graph transform plans");
+        }
     }
 
-    void advanceDeviceState(const SpectralField &noise) override {
+    void advanceTimeStep(const SpectralField &noise) override {
         if (!noise.empty()) {
             if (!noise_.data() || noise.size() != noiseCount_)
                 throw std::runtime_error("invalid device noise field");
-            cudaCheck(cudaMemcpy(noise_.data(), noise.data(),
-                                 noiseCount_ * sizeof(cufftDoubleComplex), cudaMemcpyHostToDevice),
+            cudaCheck(cudaMemcpyAsync(noise_.data(), noise.data(),
+                                      noiseCount_ * sizeof(cufftDoubleComplex),
+                                      cudaMemcpyHostToDevice, stream_.get()),
                       "upload stochastic increment");
+            // The solver reuses this host buffer immediately after the method returns.
+            cudaCheck(cudaStreamSynchronize(stream_.get()), "prepare CUDA stochastic increment");
         }
+        if (graphEnabled_) {
+            if (!graphExec_)
+                captureStepGraph();
+            cudaCheck(cudaGraphLaunch(graphExec_, stream_.get()), "launch CUDA timestep graph");
+        } else {
+            executeStep();
+        }
+    }
+
+    void executeStep() {
         rightHandSide(input_.data(), stages_.n1);
         launchStage(IntegrationStage::a);
         rightHandSide(stages_.a, stages_.n2);
@@ -326,27 +378,33 @@ class CudaBackend final : public NonlinearBackend {
         }
         launchStage(IntegrationStage::finish);
         if (compactNoise_) {
-            addSparseNoise<<<blocks(noiseCount_), threads>>>(input_.data(), noise_.data(),
-                                                             noiseIndices_.data(), noiseCount_);
+            addSparseNoise<<<blocks(noiseCount_), threads, 0, stream_.get()>>>(
+                input_.data(), noise_.data(), noiseIndices_.data(), noiseCount_);
             cudaCheck(cudaGetLastError(), "add compact stochastic increment");
         }
         constrain(input_.data());
     }
 
-    void downloadStateAndEvaluate(SpectralField &vorticity, SpectralField &output) override {
+    void downloadState(SpectralField &vorticity) override {
+        cudaCheck(cudaStreamSynchronize(stream_.get()), "synchronize integrated vorticity");
+        downloadStateDevice(vorticity);
+    }
+
+    void evaluateCurrent(SpectralField &output) override {
         evaluateDevice(input_.data(), result_.data());
-        downloadState(vorticity);
+        cudaCheck(cudaStreamSynchronize(stream_.get()), "synchronize current nonlinear evaluation");
         downloadResult(output);
     }
 
     void evaluate(const SpectralField &vorticity, SpectralField &output) override {
         uploadState(vorticity);
         evaluateDevice(input_.data(), result_.data());
+        cudaCheck(cudaStreamSynchronize(stream_.get()), "synchronize nonlinear evaluation");
         downloadResult(output);
     }
 
   private:
-    void downloadState(SpectralField &vorticity) {
+    void downloadStateDevice(SpectralField &vorticity) {
         vorticity.resize(baseCount_);
         cudaCheck(cudaMemcpy(vorticity.data(), input_.data(),
                              baseCount_ * sizeof(cufftDoubleComplex), cudaMemcpyDeviceToHost),
@@ -374,13 +432,13 @@ class CudaBackend final : public NonlinearBackend {
     }
 
     void constrain(cufftDoubleComplex *vorticity) {
-        constrainModes<<<blocks(baseCount_), threads>>>(vorticity, parameters_.ny,
-                                                        parameters_.nxf());
+        constrainModes<<<blocks(baseCount_), threads, 0, stream_.get()>>>(vorticity, parameters_.ny,
+                                                                          parameters_.nxf());
         cudaCheck(cudaGetLastError(), "constrain device spectral field");
     }
 
     void launchStage(IntegrationStage stage) {
-        integrateStage<<<blocks(baseCount_), threads>>>(
+        integrateStage<<<blocks(baseCount_), threads, 0, stream_.get()>>>(
             stage, parameters_.integrator, parameters_.timeStep, baseCount_, coefficients_,
             input_.data(), stages_, compactNoise_ ? nullptr : noise_.data());
         cudaCheck(cudaGetLastError(), "integrate device Runge-Kutta stage");
@@ -389,13 +447,14 @@ class CudaBackend final : public NonlinearBackend {
     void rightHandSide(const cufftDoubleComplex *vorticity, cufftDoubleComplex *output) {
         evaluateDevice(vorticity, output);
         if (forcing_.data()) {
-            addForcing<<<blocks(baseCount_), threads>>>(output, forcing_.data(), baseCount_);
+            addForcing<<<blocks(baseCount_), threads, 0, stream_.get()>>>(output, forcing_.data(),
+                                                                          baseCount_);
             cudaCheck(cudaGetLastError(), "add deterministic device forcing");
         }
     }
 
     void evaluateDevice(const cufftDoubleComplex *vorticity, cufftDoubleComplex *output) {
-        populateComponents<<<blocks(paddedCount_), threads>>>(
+        populateComponents<<<blocks(paddedCount_), threads, 0, stream_.get()>>>(
             vorticity, fields_.data(), parameters_.ny, parameters_.nxf(), parameters_.my(),
             parameters_.mxf(), parameters_.lx(), parameters_.ly());
         cudaCheck(cudaGetLastError(), "launch spectral derivative kernel");
@@ -406,8 +465,8 @@ class CudaBackend final : public NonlinearBackend {
         cufftCheck(cufftExecZ2D(inverse_.get(), fields_.data(), realFields_.data()),
                    "execute batched inverse transform");
 #endif
-        multiplyFields<<<blocks(realCount_), threads>>>(realFields_.data(), product_.data(),
-                                                        realCount_);
+        multiplyFields<<<blocks(realCount_), threads, 0, stream_.get()>>>(
+            realFields_.data(), product_.data(), realCount_);
         cudaCheck(cudaGetLastError(), "launch nonlinear product kernel");
 #ifdef NS2D_CUDA_MIXED
         cufftCheck(cufftExecR2C(forward_.get(), product_.data(), paddedOutput_.data()),
@@ -416,11 +475,20 @@ class CudaBackend final : public NonlinearBackend {
         cufftCheck(cufftExecD2Z(forward_.get(), product_.data(), paddedOutput_.data()),
                    "execute forward transform");
 #endif
-        extractModes<<<blocks(baseCount_), threads>>>(
+        extractModes<<<blocks(baseCount_), threads, 0, stream_.get()>>>(
             paddedOutput_.data(), output, parameters_.ny, parameters_.nxf(), parameters_.my(),
             parameters_.mxf(), 1.0 / static_cast<double>(parameters_.mx() * parameters_.my()));
         cudaCheck(cudaGetLastError(), "launch spectral extraction kernel");
         constrain(output);
+    }
+
+    void captureStepGraph() {
+        cudaCheck(cudaStreamBeginCapture(stream_.get(), cudaStreamCaptureModeThreadLocal),
+                  "begin CUDA timestep graph capture");
+        executeStep();
+        cudaCheck(cudaStreamEndCapture(stream_.get(), &graph_), "end CUDA timestep graph capture");
+        cudaCheck(cudaGraphInstantiate(&graphExec_, graph_, nullptr, nullptr, 0),
+                  "instantiate CUDA timestep graph");
     }
 
     std::array<DeviceBuffer<cufftDoubleComplex>, 10> coefficientBuffers_;
@@ -435,15 +503,19 @@ class CudaBackend final : public NonlinearBackend {
     std::size_t baseCount_ = 0, paddedCount_ = 0, realCount_ = 0;
     std::size_t noiseCount_ = 0;
     bool compactNoise_ = false;
+    bool graphEnabled_ = false;
+    cudaGraph_t graph_ = nullptr;
+    cudaGraphExec_t graphExec_ = nullptr;
     DeviceBuffer<cufftDoubleComplex> input_, result_;
     DeviceBuffer<TransformComplex> fields_, paddedOutput_;
     DeviceBuffer<TransformReal> realFields_, product_;
+    CudaStream stream_;
     CufftPlan inverse_, forward_;
 };
 } // namespace
 
 void backendInitialize(int &, char **&) { cudaCheck(cudaFree(nullptr), "initialize CUDA"); }
-void backendFinalize() {}
+void backendFinalize() { saveFftwWisdom(); }
 void backendAbort(int) {}
 void backendBarrier() { cudaCheck(cudaDeviceSynchronize(), "synchronize CUDA device"); }
 bool backendIsRoot() { return true; }
@@ -456,5 +528,6 @@ const char *backendName() {
 }
 std::uint64_t backendSynchronizeSeed(std::uint64_t seed) { return seed; }
 std::unique_ptr<NonlinearBackend> makeBackend(const Parameters &parameters) {
+    configureFftw(parameters);
     return std::make_unique<CudaBackend>(parameters);
 }

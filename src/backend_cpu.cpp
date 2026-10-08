@@ -1,5 +1,7 @@
 #include "backend.hpp"
 #include "fftw_utils.hpp"
+#include "host_stepper.hpp"
+#include "parallel.hpp"
 #include "spectral.hpp"
 
 #include <algorithm>
@@ -30,11 +32,11 @@ class CpuBackend final : public NonlinearBackend {
             const std::size_t field = componentIndex(component);
             inverse_[field].reset(fftw_plan_dft_c2r_2d(
                 static_cast<int>(parameters.my()), static_cast<int>(parameters.mx()),
-                fftwData(padded_), fields_[field].data(), FFTW_ESTIMATE));
+                fftwData(padded_), fields_[field].data(), fftwPlanningFlags()));
         }
         forward_.reset(fftw_plan_dft_r2c_2d(static_cast<int>(parameters.my()),
                                             static_cast<int>(parameters.mx()), product_.data(),
-                                            fftwData(padded_), FFTW_ESTIMATE));
+                                            fftwData(padded_), fftwPlanningFlags()));
         if (std::any_of(inverse_.begin(), inverse_.end(),
                         [](const FftwPlan &plan) { return !plan; }) ||
             !forward_)
@@ -101,17 +103,52 @@ class CpuBackend final : public NonlinearBackend {
         enforceRealityConstraints(result, parameters_);
     }
 
+    NoiseLayout noiseLayout() const override { return NoiseLayout::fullField; }
+
+    void initializeTimeStepping(const IntegrationCoefficients &coefficients,
+                                const std::vector<double> &deterministicForcing,
+                                const std::vector<std::size_t> &,
+                                const SpectralField &state) override {
+        if (state.size() != parameters_.spectralSize())
+            throw std::runtime_error("invalid initial state size");
+        coefficients_ = coefficients;
+        deterministicForcing_ = deterministicForcing;
+        state_ = state;
+        workspace_.initialize(state_.size(), parameters_.nonlinearStageCount());
+    }
+
+    void advanceTimeStep(const SpectralField &noise) override {
+        const auto rhs = [&](const SpectralField &input, SpectralField &output) {
+            evaluate(input, output);
+            if (!deterministicForcing_.empty())
+                forEachIndex(output.size(),
+                             [&](std::size_t i) { output[i] += deterministicForcing_[i]; });
+        };
+        advanceHostTimeStep(
+            parameters_, coefficients_, state_, noise, workspace_, rhs,
+            [&](SpectralField &state) { enforceRealityConstraints(state, parameters_); });
+    }
+
+    void downloadState(SpectralField &state) override { state = state_; }
+
+    void evaluateCurrent(SpectralField &nonlinearTerm) override { evaluate(state_, nonlinearTerm); }
+
     Parameters parameters_;
     FftwSpectralField padded_;
     FftwRealField product_;
     std::array<FftwRealField, 4> fields_;
     std::array<FftwPlan, 4> inverse_;
     FftwPlan forward_;
+    IntegrationCoefficients coefficients_;
+    SpectralField state_;
+    std::vector<double> deterministicForcing_;
+    HostIntegrationWorkspace workspace_;
 };
 } // namespace
 
 void backendInitialize(int &, char **&) {}
 void backendFinalize() {
+    saveFftwWisdom();
 #ifdef NS2D_HAVE_FFTW_THREADS
     if (fftwThreadsInitialized) {
         fftw_cleanup_threads();
@@ -147,5 +184,6 @@ std::unique_ptr<NonlinearBackend> makeBackend(const Parameters &parameters) {
         // OpenMP loops still use the requested thread count; FFTW remains serial.
 #endif
     }
+    configureFftw(parameters);
     return std::make_unique<CpuBackend>(parameters);
 }

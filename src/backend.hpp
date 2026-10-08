@@ -14,19 +14,20 @@ using SpectralField = std::vector<Complex>;
 
 class NonlinearBackend {
   public:
+    enum class NoiseLayout { fullField, forcedModes };
+
     virtual ~NonlinearBackend() = default;
     virtual void evaluate(const SpectralField &vorticity, SpectralField &result) = 0;
-    [[nodiscard]] virtual bool supportsDeviceTimeStepping() const { return false; }
-    virtual void initializeDeviceState(const IntegrationCoefficients &, const std::vector<double> &,
-                                       const std::vector<std::size_t> &, const SpectralField &) {
-        throw std::logic_error("backend has no device time integrator");
-    }
-    virtual void advanceDeviceState(const SpectralField &) {
-        throw std::logic_error("backend has no device time integrator");
-    }
-    virtual void downloadStateAndEvaluate(SpectralField &vorticity, SpectralField &result) {
-        evaluate(vorticity, result);
-    }
+    [[nodiscard]] virtual NoiseLayout noiseLayout() const = 0;
+    virtual void initializeTimeStepping(const IntegrationCoefficients &coefficients,
+                                        const std::vector<double> &deterministicForcing,
+                                        const std::vector<std::size_t> &noiseIndices,
+                                        const SpectralField &state) = 0;
+    virtual void advanceTimeStep(const SpectralField &noise) = 0;
+    // Distributed backends collect onto rank zero and leave the destination
+    // empty on other ranks.
+    virtual void downloadState(SpectralField &state) = 0;
+    virtual void evaluateCurrent(SpectralField &nonlinearTerm) = 0;
 };
 
 void backendInitialize(int &argc, char **&argv);

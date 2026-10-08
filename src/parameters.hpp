@@ -7,6 +7,8 @@
 
 enum class Integrator { etd2, etd3, etd4, integratingFactorRk2 };
 enum class ForcingProfile { annulus, exponential, singleMode };
+enum class FftwPlanning { estimate, measure, patient };
+enum class FieldOutputFormat { text, hdf5, both };
 
 struct Parameters {
     std::size_t nx = 1024;
@@ -34,6 +36,11 @@ struct Parameters {
     std::uint64_t randomSeed = 0;
 
     bool writeModeDiagnostics = false;
+    FieldOutputFormat fieldOutputFormat = FieldOutputFormat::text;
+    int hdf5CompressionLevel = 0;
+    FftwPlanning fftwPlanning = FftwPlanning::estimate;
+    std::filesystem::path fftwWisdomFile;
+    bool cudaGraphEnabled = false;
     int threadCount = 0;
     bool overwriteOutput = false;
     std::filesystem::path initialConditionFile;
@@ -56,10 +63,15 @@ struct Parameters {
     [[nodiscard]] bool usesStochasticForcing() const {
         return forcingEnabled && forcingProfile != ForcingProfile::singleMode;
     }
+    [[nodiscard]] std::size_t nonlinearStageCount() const {
+        return usesStageC() ? 4 : usesStageB() ? 3 : 2;
+    }
 };
 
 [[nodiscard]] const char *integratorName(Integrator integrator);
 [[nodiscard]] const char *forcingProfileName(ForcingProfile profile);
+[[nodiscard]] const char *fftwPlanningName(FftwPlanning planning);
+[[nodiscard]] const char *fieldOutputFormatName(FieldOutputFormat format);
 Parameters readParameters(const std::filesystem::path &path);
 void validateParameters(const Parameters &parameters);
 void writeParameterRecord(const Parameters &parameters, const std::string &backend,

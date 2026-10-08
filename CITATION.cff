@@ -2,6 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata in this file."
 title: "2D Navier–Stokes pseudo-spectral solver"
 type: software
+version: 0.4.0
+date-released: 2026-10-08
 authors:
   - family-names: Laurie
     given-names: Jason

@@ -11,6 +11,12 @@ struct HostIntegrationWorkspace {
     std::array<SpectralField, 3> stageStates;
 
     void initialize(std::size_t count, std::size_t nonlinearStageCount) {
+        if (nonlinearStageCount < 2 || nonlinearStageCount > nonlinearStages.size())
+            throw std::runtime_error("invalid host integration stage count");
+        for (auto &field : nonlinearStages)
+            field.clear();
+        for (auto &field : stageStates)
+            field.clear();
         for (std::size_t i = 0; i < nonlinearStageCount; ++i)
             nonlinearStages[i].resize(count);
         for (std::size_t i = 1; i < nonlinearStageCount; ++i)

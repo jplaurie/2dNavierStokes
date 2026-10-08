@@ -127,6 +127,8 @@ void beginOutputTransaction(const Parameters &parameters, std::uint64_t frame) {
     Journal journal;
     journal.frame = frame;
     const auto previous = committedFrame(parameters);
+    if (previous && frame <= *previous)
+        throw std::runtime_error("output transaction frame must follow the committed frame");
     journal.previousMetadata = previous.has_value();
     journal.previousFrame = previous.value_or(0);
     const auto files = frameFiles(parameters, frame);

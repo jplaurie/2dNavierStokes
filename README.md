@@ -427,6 +427,7 @@ examples/
 tests/
   parameters.cpp              parameter parsing and validation tests
   numerics.cpp                numerical unit tests
+  runtime_guards.cpp          transaction ordering and workspace reuse tests
   regression.py               output, restart, and backend regression tests
   hdf5_output.py              HDF5 round-trip and exporter tests
 scripts/
@@ -455,7 +456,7 @@ the dates below are the dates of the tagged commits.
 
 | Version | Date | Changes |
 | --- | --- | --- |
-| `v0.4.0` | 2026-10-08 | Unified backend time stepping, distributed MPI state, FFTW planning/wisdom, optional CUDA graphs, HDF5 field I/O/export, build provenance, and CPU CI coverage. |
+| `v0.4.0` | 2026-10-08 | Unified backend time stepping, distributed MPI state, FFTW planning/wisdom, optional CUDA graphs, HDF5 field I/O/export, build provenance, CPU CI coverage, and defensive provenance, exporter, transaction, and workspace checks. |
 | `v0.3.0` | 2026-10-04 | Added the mixed-precision CUDA path, reproducible multi-backend benchmarks and performance plots; clarified typed configuration and the CUDA implementation and expanded regression coverage. |
 | `v0.2.0` | 2026-09-16 | Refactored the shared solver, reduced CUDA transfers for stochastic forcing and added plotting, diagnostic-notebook and movie tools. |
 | `v0.1.0` | 2026-09-06 | Introduced the modern C++20 solver with shared CPU/OpenMP, MPI/OpenMP and CUDA implementations, unified builds, restartable output and numerical/regression tests. |

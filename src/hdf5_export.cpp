@@ -30,7 +30,7 @@ void writeGnuplot(std::ostream &output, const Hdf5Field &field) {
 
 int main(int argc, char **argv) {
     try {
-        if (argc < 3 || argc > 5)
+        if (argc != 3 && argc != 5)
             throw std::runtime_error(
                 "usage: ns2d_hdf5_export INPUT.h5 OUTPUT [--format field|gnuplot]");
         std::string format = "field";

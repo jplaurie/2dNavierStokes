@@ -16,6 +16,13 @@ def run(command):
                            f"{result.stdout}\n{result.stderr}")
 
 
+def require_failure(command, expected):
+    result = subprocess.run([str(value) for value in command], text=True, capture_output=True)
+    if result.returncode == 0 or expected not in result.stderr:
+        raise RuntimeError(f"command did not fail as expected: {' '.join(map(str, command))}\n"
+                           f"{result.stdout}\n{result.stderr}")
+
+
 def numbers(path):
     return [float(value) for value in path.read_text().split()]
 
@@ -83,6 +90,8 @@ def main():
             expected, actual = numbers(text_field), numbers(exported)
             assert len(expected) == len(actual) == 12 * 8
             assert max(abs(a - b) for a, b in zip(expected, actual)) < 1e-12
+            require_failure([args.exporter, hdf5_field, exported, "--format"],
+                            "usage: ns2d_hdf5_export")
             if frame == 0:
                 check_python_reader(hdf5_field, text_field)
 

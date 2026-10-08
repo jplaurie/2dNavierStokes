@@ -7,16 +7,23 @@ set(NS2D_GIT_DIRTY "unknown")
 if(Git_FOUND)
   execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE NS2D_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE
+    OUTPUT_VARIABLE NS2D_GIT_COMMIT_CANDIDATE OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE NS2D_GIT_COMMIT_RESULT
     ERROR_QUIET)
+  if(NS2D_GIT_COMMIT_RESULT EQUAL 0)
+    set(NS2D_GIT_COMMIT "${NS2D_GIT_COMMIT_CANDIDATE}")
+  endif()
   execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     OUTPUT_VARIABLE NS2D_GIT_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE NS2D_GIT_STATUS_RESULT
     ERROR_QUIET)
-  if(NS2D_GIT_STATUS STREQUAL "")
-    set(NS2D_GIT_DIRTY "false")
-  else()
-    set(NS2D_GIT_DIRTY "true")
+  if(NS2D_GIT_STATUS_RESULT EQUAL 0)
+    if(NS2D_GIT_STATUS STREQUAL "")
+      set(NS2D_GIT_DIRTY "false")
+    else()
+      set(NS2D_GIT_DIRTY "true")
+    endif()
   endif()
 endif()
 
@@ -185,6 +192,10 @@ if(BUILD_TESTING)
   add_executable(ns2d_numerics_tests tests/numerics.cpp src/backend_cpu.cpp)
   configure_host_target(ns2d_numerics_tests)
   add_test(NAME nonlinear_direct_dft COMMAND ns2d_numerics_tests)
+  add_executable(ns2d_runtime_guard_tests tests/runtime_guards.cpp)
+  configure_host_target(ns2d_runtime_guard_tests)
+  add_test(NAME runtime_guards COMMAND ns2d_runtime_guard_tests)
+
   set(NS2D_SMOKE_DIR "${CMAKE_CURRENT_BINARY_DIR}/smoke")
   file(MAKE_DIRECTORY "${NS2D_SMOKE_DIR}")
   configure_file(tests/smoke.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/smoke.cmake" @ONLY)

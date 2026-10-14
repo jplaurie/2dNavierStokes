@@ -2,6 +2,7 @@
 /data/
 /output/
 /parameters.txt
+.DS_Store
 *.o
 *.swp
 __pycache__/

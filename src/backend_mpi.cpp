@@ -129,17 +129,21 @@ class MpiBackend final : public NonlinearBackend {
                     (*localFields[field])[mode.paddedIndex] =
                         (*globalFields[field])[mode.baseIndex];
         }
-        localNoise_.resize(state_.size());
+        if (parameters_.usesStochasticForcing())
+            localNoise_.resize(state_.size());
         workspace_.initialize(state_.size(), parameters_.nonlinearStageCount());
     }
 
     void advanceTimeStep(const SpectralField &noise) override {
-        if (!noise.empty() && noise.size() != parameters_.spectralSize())
+        if (!noise.empty() &&
+            (noise.size() != parameters_.spectralSize() || localNoise_.size() != state_.size()))
             throw std::runtime_error("invalid MPI stochastic-noise field");
-        std::fill(localNoise_.begin(), localNoise_.end(), Complex{});
-        if (!noise.empty())
+        if (!noise.empty()) {
+            std::fill(localNoise_.begin(), localNoise_.end(), Complex{});
             for (const LocalMode &mode : localModes_)
                 localNoise_[mode.paddedIndex] = noise[mode.baseIndex];
+        }
+        const SpectralField &stepNoise = noise.empty() ? noise : localNoise_;
         const auto rhs = [&](const SpectralField &input, SpectralField &output) {
             evaluateLocal(input, output);
             if (!deterministicForcing_.empty())
@@ -147,8 +151,7 @@ class MpiBackend final : public NonlinearBackend {
                              [&](std::size_t i) { output[i] += deterministicForcing_[i]; });
         };
         advanceHostTimeStep(
-            parameters_, coefficients_, state_, noise.empty() ? SpectralField{} : localNoise_,
-            workspace_, rhs,
+            parameters_, coefficients_, state_, stepNoise, workspace_, rhs,
             [&](SpectralField &localState) { enforceLocalConstraints(localState); });
     }
 

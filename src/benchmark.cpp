@@ -61,6 +61,7 @@ int main(int argc, char **argv) {
                       << parameters.nx << ',' << parameters.ny << ',' << measuredSteps << ','
                       << elapsed << ',' << elapsed / static_cast<double>(measuredSteps) << '\n';
         }
+        backendSaveWisdom();
         backendFinalize();
         return 0;
     } catch (const std::exception &error) {

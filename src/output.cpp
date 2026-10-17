@@ -121,9 +121,8 @@ std::vector<double> readRealField(const std::filesystem::path &path, const Param
             throw std::runtime_error("vorticity field contains a non-finite value: " +
                                      path.string());
     }
-    double extra = 0.0;
-    if (input >> extra)
-        throw std::runtime_error("vorticity field has too many values: " + path.string());
+    if (!(input >> std::ws).eof())
+        throw std::runtime_error("vorticity field has unexpected trailing data: " + path.string());
     return field;
 }
 

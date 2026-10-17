@@ -48,7 +48,6 @@ class CpuBackend final : public NonlinearBackend {
             throw std::runtime_error("invalid nonlinear input size");
         for (const NonlinearComponent component : nonlinearComponents) {
             const std::size_t field = componentIndex(component);
-            std::fill(padded_.begin(), padded_.end(), Complex{});
             fillComponent(vorticity, component);
             inverse_[field].execute();
         }
@@ -77,12 +76,22 @@ class CpuBackend final : public NonlinearBackend {
         for (std::ptrdiff_t rawY = 0; rawY < static_cast<std::ptrdiff_t>(parameters_.ny); ++rawY) {
             const std::size_t y = static_cast<std::size_t>(rawY);
             const std::size_t py = paddedWaveRow(y, parameters_.ny, parameters_.my());
+            auto row = padded_.begin() + static_cast<std::ptrdiff_t>(py * parameters_.mxf());
             const double ky = waveNumberY(parameters_, y);
             for (std::size_t x = 0; x < parameters_.nxf(); ++x) {
                 const double kx = waveNumberX(parameters_, x);
                 padded_[spectralIndex(x, py, parameters_.mxf())] =
                     vorticity[spectralIndex(x, y, parameters_.nxf())] *
                     nonlinearFactor(component, kx, ky);
+            }
+            std::fill(row + parameters_.nxf(), row + parameters_.mxf(), Complex{});
+            // Assign one middle padding row to every other base row. Each
+            // thread gets similar derivative work and padding traffic.
+            if (y % 2 == 0) {
+                const std::size_t paddingY = parameters_.ny / 2 + y / 2;
+                auto padding =
+                    padded_.begin() + static_cast<std::ptrdiff_t>(paddingY * parameters_.mxf());
+                std::fill(padding, padding + parameters_.mxf(), Complex{});
             }
         }
     }
@@ -147,8 +156,8 @@ class CpuBackend final : public NonlinearBackend {
 } // namespace
 
 void backendInitialize(int &, char **&) {}
-void backendFinalize() {
-    saveFftwWisdom();
+void backendSaveWisdom() { saveFftwWisdom(); }
+void backendFinalize() noexcept {
 #ifdef NS2D_HAVE_FFTW_THREADS
     if (fftwThreadsInitialized) {
         fftw_cleanup_threads();

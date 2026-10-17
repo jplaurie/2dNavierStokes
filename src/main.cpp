@@ -18,6 +18,7 @@ int main(int argc, char **argv) {
             Solver solver(std::move(parameters), std::move(backend));
             solver.run();
         } // Destroy every FFT plan before cleaning up its FFT runtime.
+        backendSaveWisdom();
         backendFinalize();
         return 0;
     } catch (const std::exception &error) {

@@ -279,6 +279,11 @@ count when FFTW threads support is available. For MPI, plan for
 fields remain slab-distributed; full fields are gathered to rank zero only at
 output frames. Only rank zero writes files.
 
+Stochastic increments are generated once on rank zero in the same mode order as
+the CPU reference, then scattered to the ranks that own those modes. Full-grid
+forcing and noise-scale buffers used during setup are released before stepping;
+only compact forced-mode data and local increments remain.
+
 CUDA keeps state, ETD stages, nonlinear transforms, and forcing on the device.
 Set `cudaGraphEnabled true` to capture and replay the fixed timestep as a CUDA
 graph. This can reduce launch overhead in long production runs; leave it off
@@ -341,6 +346,10 @@ is deterministic forcing at the `(m, +m)` and `(m, -m)` modes, where `m` is
 Each fresh run saves frame zero, then saves at the requested cadence and at the
 final step. The initial frame has no diagnostics row because diagnostics are
 computed after an integration step.
+
+CSV energy, enstrophy, dissipation rates, spectra, and fluxes use spatial-average
+normalization. Multiply by `Lx * Ly` to obtain domain integrals. The diagnostics
+notebook does this when `INTEGRATE_OVER_AREA=True`.
 
 | Location | Contents |
 | --- | --- |

@@ -36,7 +36,7 @@ class Solver {
     IntegrationCoefficients coefficients_;
     SpectralField noise_;
     SpectralField diagnosticNonlinearTerm_;
-    std::vector<double> forcingAmplitude_, stochasticNoiseScale_;
+    std::vector<double> forcingAmplitude_, stochasticNoiseScale_, noiseWeights_;
     std::vector<std::size_t> forcedIndices_;
     std::vector<std::pair<std::size_t, std::size_t>> compactNoiseRealityPairs_;
     std::size_t forcedModeCount_ = 0;

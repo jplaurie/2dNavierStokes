@@ -5,6 +5,7 @@ import argparse
 import cmath
 import csv
 import math
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -126,6 +127,32 @@ def numerics(root, cpu):
 
 
 def output(root, cpu):
+    bad_field = field(root / "trailing.dat", 16, 16, lambda x, y: math.cos(x+y))
+    for suffix in ["garbage\n", "0\n", "1e999\n"]:
+        bad_field.write_text("0 " * 256 + suffix)
+        folder = parameters(root / "trailing", initialConditionFile=bad_field)
+        run(cpu, folder, error="unexpected trailing data")
+
+    folder = parameters(root / "wisdom_failure", fftwWisdomFile=root / "missing/fftw.wisdom")
+    result = run(cpu, folder, error="cannot export FFTW wisdom")
+    require(result.returncode == 1 and "terminate called" not in result.stderr,
+            "Wisdom save failure must exit cleanly")
+
+    folder = parameters(root / "time_precision", timeStep=1, numberOfSteps=1)
+    run(cpu, folder)
+    metadata = folder / "data/restart_state.txt"
+    original = metadata.read_bytes()
+    parameters(folder, timeStep=1e-20, numberOfSteps=1)
+    run(cpu, folder, error="timeStep is too small")
+    require(metadata.read_bytes() == original, "Rejected time step changed the checkpoint")
+
+    folder = parameters(root / "accurate_time", timeStep=.01, numberOfSteps=1000,
+                        outputIntervalSteps=1000)
+    run(cpu, folder)
+    saved_time = float(re.search(r"^time (.*)$", (folder / "data/restart_state.txt").read_text(),
+                                re.MULTILINE).group(1))
+    require(saved_time == 10.0, "Simulation clock accumulated rounding error")
+
     initial = field(root / "small.dat", 4, 4, lambda x, y: math.sin(y))
     folder = parameters(root / "small", nx=4, ny=4, initialConditionFile=initial,
                         writeModeDiagnostics="true")
@@ -201,6 +228,23 @@ def backend(root, cpu, candidate, tolerance):
     initial = field(root / "initial.dat", 32, 48,
                     lambda x, y: math.sin(x) + .4*math.cos(2*y) + .2*math.sin(3*x-y))
     largest_difference = 0.0
+    # Only the ky=0 slab owns a forced mode. Other MPI ranks must participate
+    # in the noise scatter with a zero receive count, including after restart.
+    sparse_settings = dict(nx=32, ny=4, forcingEnabled="true", forcingWavenumber=8,
+                           forcingWidth=.001, forcingAmplitude=.02, timeStep=.001,
+                           numberOfSteps=4, outputIntervalSteps=2)
+    sparse_reference = parameters(root / "cpu_sparse", **sparse_settings)
+    sparse_candidate = parameters(root / "candidate_sparse", **sparse_settings)
+    run(cpu, sparse_reference)
+    run(candidate, sparse_candidate)
+    error = difference(checkpoint(sparse_reference, 2), checkpoint(sparse_candidate, 2))
+    largest_difference = max(largest_difference, error)
+    require(error < tolerance, "Backend mismatch with sparsely owned stochastic modes")
+    sparse_split = parameters(root / "split_sparse", **(sparse_settings | {"numberOfSteps": 2}))
+    run(candidate, sparse_split)
+    run(candidate, sparse_split)
+    require(checkpoint(sparse_split, 2) == checkpoint(sparse_candidate, 2),
+            "Sparse stochastic restart mismatch")
     for method in ["etd2", "etd3", "etd4", "rk2"]:
         for profile in ["disabled", "annulus", "exponential", "singleMode"]:
             settings = dict(nx=32, ny=48, aspectRatio=2, integrator=method,

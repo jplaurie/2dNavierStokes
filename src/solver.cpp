@@ -39,10 +39,9 @@ std::uint64_t resolveRandomSeed(std::uint64_t configuredSeed) {
 Solver::Solver(Parameters parameters, std::unique_ptr<NonlinearBackend> backend)
     : parameters_(std::move(parameters)), backend_(std::move(backend)),
       baseTransform_(std::make_unique<BaseTransform>(parameters_)),
-      linearOperator_(makeSpectralField(parameters_)),
-      noise_(makeSpectralField(parameters_, parameters_.usesStochasticForcing())),
-      diagnosticNonlinearTerm_(), forcingAmplitude_(parameters_.spectralSize()),
-      stochasticNoiseScale_(noise_.size()),
+      linearOperator_(makeSpectralField(parameters_)), diagnosticNonlinearTerm_(),
+      forcingAmplitude_(parameters_.spectralSize()),
+      stochasticNoiseScale_(parameters_.usesStochasticForcing() ? parameters_.spectralSize() : 0),
       random_(parameters_.randomSeed = resolveRandomSeed(parameters_.randomSeed)) {
 #ifdef _OPENMP
     if (parameters_.threadCount > 0)
@@ -53,11 +52,19 @@ Solver::Solver(Parameters parameters, std::unique_ptr<NonlinearBackend> backend)
     SpectralField{}.swap(linearOperator_);
     if (parameters_.forcingEnabled) {
         buildForcing();
-        if (parameters_.usesStochasticForcing() &&
-            backend_->noiseLayout() == NonlinearBackend::NoiseLayout::forcedModes) {
-            compactNoise_ = true;
-            SpectralField compactNoise(forcedIndices_.size());
-            noise_.swap(compactNoise);
+        compactNoise_ = parameters_.usesStochasticForcing() &&
+                        backend_->noiseLayout() != NonlinearBackend::NoiseLayout::fullField;
+        const bool generateHere =
+            backend_->noiseLayout() != NonlinearBackend::NoiseLayout::rootForcedModes ||
+            backendIsRoot();
+        if (parameters_.usesStochasticForcing() && generateHere) {
+            noise_.resize(compactNoise_ ? forcedIndices_.size() : parameters_.spectralSize());
+            noiseWeights_.reserve(forcedIndices_.size());
+            for (const std::size_t index : forcedIndices_)
+                noiseWeights_.push_back(forcingAmplitude_[index] * std::sqrt(0.5) *
+                                        stochasticNoiseScale_[index]);
+        }
+        if (parameters_.usesStochasticForcing() && compactNoise_ && generateHere) {
             for (std::size_t destination = 0; destination < forcedIndices_.size(); ++destination) {
                 const std::size_t index = forcedIndices_[destination];
                 const std::size_t x = index % parameters_.nxf();
@@ -74,6 +81,7 @@ Solver::Solver(Parameters parameters, std::unique_ptr<NonlinearBackend> backend)
             }
         }
     }
+    std::vector<double>{}.swap(stochasticNoiseScale_);
 }
 
 void Solver::buildLinearOperator() {
@@ -262,14 +270,11 @@ void Solver::buildForcing() {
 void Solver::generateNoise(SpectralField &noise) {
     if (!compactNoise_)
         std::fill(noise.begin(), noise.end(), Complex{});
-    const double scale = std::sqrt(0.5);
-    for (std::size_t position = 0; position < forcedIndices_.size(); ++position) {
-        const std::size_t i = forcedIndices_[position];
-        const double amplitude = forcingAmplitude_[i];
+    for (std::size_t position = 0; position < noiseWeights_.size(); ++position) {
         const double real = normal_(random_);
         const double imaginary = normal_(random_);
-        noise[compactNoise_ ? position : i] =
-            (amplitude * scale * stochasticNoiseScale_[i]) * Complex(real, imaginary);
+        noise[compactNoise_ ? position : forcedIndices_[position]] =
+            noiseWeights_[position] * Complex(real, imaginary);
     }
     if (compactNoise_) {
         for (const auto [destination, source] : compactNoiseRealityPairs_)
@@ -302,6 +307,11 @@ void Solver::validateRunBounds(const RestartState &state) const {
         static_cast<long double>(parameters_.timeStep) * parameters_.numberOfSteps;
     if (finalTime > static_cast<long double>(std::numeric_limits<double>::max()))
         throw std::runtime_error("requested run would overflow simulation time");
+    const double finalTimeDouble = static_cast<double>(finalTime);
+    const double finalTimeSpacing = finalTimeDouble - std::nextafter(finalTimeDouble, 0.0);
+    if (state.time + parameters_.timeStep <= state.time || parameters_.timeStep < finalTimeSpacing)
+        throw std::runtime_error(
+            "timeStep is too small to advance simulation time at this magnitude");
 
     const std::uint64_t scheduledOutputs =
         parameters_.numberOfSteps / parameters_.outputIntervalSteps +
@@ -336,6 +346,11 @@ void Solver::initializeTimeStepping(const SpectralField &vorticity) {
             : noForcing,
         compactNoise_ ? forcedIndices_ : noStochasticIndices, vorticity);
     coefficients_ = {};
+    // Run records and backend initialization have consumed the full-grid data.
+    // Stochastic updates retain only weights for the forced modes.
+    std::vector<double>{}.swap(forcingAmplitude_);
+    if (compactNoise_)
+        std::vector<std::size_t>{}.swap(forcedIndices_);
 }
 
 RestartState Solver::prepareRun() {
@@ -420,11 +435,17 @@ void Solver::writeOutputFrame(const RestartState &state, DiagnosticsAverages &av
 void Solver::run() {
     RestartState state = prepareRun();
     DiagnosticsAverages averages;
+    const long double initialTime = state.time;
     const auto start = std::chrono::steady_clock::now();
     for (std::uint64_t stepIndex = 0; stepIndex < parameters_.numberOfSteps; ++stepIndex) {
         const std::uint64_t stepNumber = stepIndex + 1;
+        const double nextTime = static_cast<double>(
+            std::fma(static_cast<long double>(stepNumber),
+                     static_cast<long double>(parameters_.timeStep), initialTime));
+        if (!std::isfinite(nextTime) || nextTime <= state.time)
+            throw std::runtime_error("timeStep cannot advance simulation time");
         step();
-        state.time += parameters_.timeStep;
+        state.time = nextTime;
         if (stepNumber % parameters_.outputIntervalSteps == 0 ||
             stepNumber == parameters_.numberOfSteps) {
             ++state.frame;

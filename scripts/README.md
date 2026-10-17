@@ -50,7 +50,8 @@ For quick-start output, change the input paths in the configuration cell to
 `ROOT / 'data/quickstart_modern'` and
 `ROOT / 'output/quickstart_modern/...'`. The diagnostics notebook supports
 inclusive `TIME_RANGE` and `FRAME_RANGE` selections, an optional rolling
-average, and domain-area normalization.
+average, and `INTEGRATE_OVER_AREA=True` to convert the solver's spatially
+averaged quantities and rates into domain integrals. The default plots densities.
 
 ## Movies
 

@@ -104,11 +104,11 @@ class MpiBackend final : public NonlinearBackend {
         enforceRealityConstraints(result, parameters_);
     }
 
-    NoiseLayout noiseLayout() const override { return NoiseLayout::fullField; }
+    NoiseLayout noiseLayout() const override { return NoiseLayout::rootForcedModes; }
 
     void initializeTimeStepping(const IntegrationCoefficients &coefficients,
                                 const std::vector<double> &deterministicForcing,
-                                const std::vector<std::size_t> &,
+                                const std::vector<std::size_t> &noiseIndices,
                                 const SpectralField &state) override {
         if (state.size() != parameters_.spectralSize())
             throw std::runtime_error("invalid initial state size");
@@ -130,20 +130,26 @@ class MpiBackend final : public NonlinearBackend {
                         (*globalFields[field])[mode.baseIndex];
         }
         if (parameters_.usesStochasticForcing())
-            localNoise_.resize(state_.size());
+            initializeNoiseDistribution(noiseIndices);
         workspace_.initialize(state_.size(), parameters_.nonlinearStageCount());
     }
 
     void advanceTimeStep(const SpectralField &noise) override {
-        if (!noise.empty() &&
-            (noise.size() != parameters_.spectralSize() || localNoise_.size() != state_.size()))
-            throw std::runtime_error("invalid MPI stochastic-noise field");
-        if (!noise.empty()) {
-            std::fill(localNoise_.begin(), localNoise_.end(), Complex{});
-            for (const LocalMode &mode : localModes_)
-                localNoise_[mode.paddedIndex] = noise[mode.baseIndex];
+        if (parameters_.usesStochasticForcing()) {
+            if ((rank == 0 && noise.size() != packedNoise_.size()) || (rank != 0 && !noise.empty()))
+                throw std::runtime_error("invalid MPI stochastic-noise field");
+            if (rank == 0)
+                for (std::size_t i = 0; i < rootNoisePositions_.size(); ++i)
+                    packedNoise_[i] = noise[rootNoisePositions_[i]];
+            mpiCheck(MPI_Scatterv(packedNoise_.data(), noiseCounts_.data(),
+                                  noiseDisplacements_.data(), MPI_CXX_DOUBLE_COMPLEX,
+                                  receivedNoise_.data(), static_cast<int>(receivedNoise_.size()),
+                                  MPI_CXX_DOUBLE_COMPLEX, 0, MPI_COMM_WORLD),
+                     "MPI_Scatterv stochastic increments");
+            for (std::size_t i = 0; i < localNoiseOffsets_.size(); ++i)
+                localNoise_[localNoiseOffsets_[i]] = receivedNoise_[i];
         }
-        const SpectralField &stepNoise = noise.empty() ? noise : localNoise_;
+        const SpectralField &stepNoise = parameters_.usesStochasticForcing() ? localNoise_ : noise;
         const auto rhs = [&](const SpectralField &input, SpectralField &output) {
             evaluateLocal(input, output);
             if (!deterministicForcing_.empty())
@@ -164,6 +170,48 @@ class MpiBackend final : public NonlinearBackend {
     }
 
   private:
+    void initializeNoiseDistribution(const std::vector<std::size_t> &indices) {
+        if (indices.empty() || indices.size() > parameters_.spectralSize() ||
+            !std::is_sorted(indices.begin(), indices.end()) ||
+            indices.back() >= parameters_.spectralSize() ||
+            std::adjacent_find(indices.begin(), indices.end()) != indices.end())
+            throw std::runtime_error("invalid MPI stochastic mode indices");
+        localNoiseOffsets_.clear();
+        std::vector<std::uint64_t> positions;
+        for (const LocalMode &mode : localModes_) {
+            const auto found = std::lower_bound(indices.begin(), indices.end(), mode.baseIndex);
+            if (found != indices.end() && *found == mode.baseIndex) {
+                positions.push_back(static_cast<std::uint64_t>(found - indices.begin()));
+                localNoiseOffsets_.push_back(mode.paddedIndex);
+            }
+        }
+        int processes = 0;
+        mpiCheck(MPI_Comm_size(MPI_COMM_WORLD, &processes), "MPI_Comm_size");
+        noiseCounts_.resize(static_cast<std::size_t>(processes));
+        noiseDisplacements_.resize(noiseCounts_.size());
+        const int localCount = static_cast<int>(positions.size());
+        mpiCheck(
+            MPI_Allgather(&localCount, 1, MPI_INT, noiseCounts_.data(), 1, MPI_INT, MPI_COMM_WORLD),
+            "MPI_Allgather stochastic counts");
+        int total = 0;
+        for (std::size_t i = 0; i < noiseCounts_.size(); ++i) {
+            noiseDisplacements_[i] = total;
+            total += noiseCounts_[i];
+        }
+        if (static_cast<std::size_t>(total) != indices.size())
+            throw std::runtime_error("MPI stochastic mode ownership is incomplete");
+        if (rank == 0) {
+            rootNoisePositions_.resize(indices.size());
+            packedNoise_.resize(indices.size());
+        }
+        mpiCheck(MPI_Gatherv(positions.data(), localCount, MPI_UINT64_T, rootNoisePositions_.data(),
+                             noiseCounts_.data(), noiseDisplacements_.data(), MPI_UINT64_T, 0,
+                             MPI_COMM_WORLD),
+                 "MPI_Gatherv stochastic mode positions");
+        receivedNoise_.resize(positions.size());
+        localNoise_.assign(state_.size(), Complex{});
+    }
+
     void fillComponent(const SpectralField &localState, NonlinearComponent component) {
         std::fill(padded_.begin(), padded_.end(), Complex{});
         forEachIndex(localModes_.size(), [&](std::size_t i) {
@@ -247,6 +295,10 @@ class MpiBackend final : public NonlinearBackend {
     std::array<FftwPlan, 4> inverse_;
     FftwPlan forward_;
     SpectralField state_, localNoise_;
+    SpectralField packedNoise_, receivedNoise_;
+    std::vector<std::uint64_t> rootNoisePositions_;
+    std::vector<std::size_t> localNoiseOffsets_;
+    std::vector<int> noiseCounts_, noiseDisplacements_;
     SpectralField localRealityLine_, globalRealityLine_;
     std::vector<double> deterministicForcing_;
     IntegrationCoefficients coefficients_;
@@ -274,10 +326,12 @@ void backendInitialize(int &argc, char **&argv) {
     fftw_mpi_init();
 }
 
-void backendFinalize() {
+void backendSaveWisdom() {
     fftw_mpi_gather_wisdom(MPI_COMM_WORLD);
     if (rank == 0)
         saveFftwWisdom();
+}
+void backendFinalize() noexcept {
     fftw_mpi_cleanup();
 #ifdef NS2D_HAVE_FFTW_THREADS
     if (fftwThreadsInitialized) {

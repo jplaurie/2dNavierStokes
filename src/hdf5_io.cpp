@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -32,6 +33,14 @@ template <herr_t (*Close)(hid_t)> class Hdf5Handle {
         return *this;
     }
     [[nodiscard]] hid_t get() const { return id_; }
+    herr_t close() {
+        if (id_ < 0)
+            return 0;
+        const herr_t status = Close(id_);
+        if (status >= 0)
+            id_ = -1;
+        return status;
+    }
 
   private:
     hid_t id_ = -1;
@@ -78,9 +87,22 @@ void writeStringAttribute(hid_t object, const char *name, const char *value) {
                    std::string("cannot write HDF5 attribute: ") + name);
 }
 
+void requireScalarAttribute(hid_t attribute, const char *name) {
+    DataSpace space(requireId(H5Aget_space(attribute), "cannot inspect HDF5 attribute space"));
+    if (H5Sget_simple_extent_type(space.get()) != H5S_SCALAR)
+        throw std::runtime_error(std::string("HDF5 attribute must be scalar: ") + name);
+}
+
 template <class T> T readScalarAttribute(hid_t object, const char *name, hid_t type) {
     Attribute attribute(requireId(H5Aopen(object, name, H5P_DEFAULT),
                                   std::string("missing HDF5 attribute: ") + name));
+    requireScalarAttribute(attribute.get(), name);
+    DataType storedType(
+        requireId(H5Aget_type(attribute.get()), "cannot inspect HDF5 attribute type"));
+    const auto storedClass = H5Tget_class(storedType.get());
+    const auto expectedClass = H5Tget_class(type);
+    if (storedClass != expectedClass && !(expectedClass == H5T_FLOAT && storedClass == H5T_INTEGER))
+        throw std::runtime_error(std::string("invalid HDF5 numeric attribute type: ") + name);
     T value{};
     requireSuccess(H5Aread(attribute.get(), type, &value),
                    std::string("cannot read HDF5 attribute: ") + name);
@@ -90,7 +112,19 @@ template <class T> T readScalarAttribute(hid_t object, const char *name, hid_t t
 std::string readStringAttribute(hid_t object, const char *name) {
     Attribute attribute(requireId(H5Aopen(object, name, H5P_DEFAULT),
                                   std::string("missing HDF5 attribute: ") + name));
+    requireScalarAttribute(attribute.get(), name);
     DataType type(requireId(H5Aget_type(attribute.get()), "cannot inspect HDF5 string attribute"));
+    if (H5Tget_class(type.get()) != H5T_STRING)
+        throw std::runtime_error(std::string("invalid HDF5 string attribute type: ") + name);
+    if (H5Tis_variable_str(type.get()) > 0) {
+        char *value = nullptr;
+        const herr_t status = H5Aread(attribute.get(), type.get(), &value);
+        const std::unique_ptr<char, decltype(&H5free_memory)> memory(value, H5free_memory);
+        requireSuccess(status, std::string("cannot read HDF5 attribute: ") + name);
+        if (!value || std::strlen(value) > 1024)
+            throw std::runtime_error("invalid HDF5 string attribute size");
+        return value;
+    }
     const std::size_t size = H5Tget_size(type.get());
     if (size == 0 || size > 1024)
         throw std::runtime_error("invalid HDF5 string attribute size");
@@ -153,6 +187,13 @@ void writeHdf5Field(const std::filesystem::path &path, const Parameters &paramet
     requireSuccess(
         H5Dwrite(dataset.get(), H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, physical.data()),
         "cannot write HDF5 vorticity dataset");
+    // Buffered writes can fail only when a dataset or file is flushed/closed.
+    // Report that failure before the caller renames and commits this snapshot.
+    requireSuccess(dataset.close(), "cannot close HDF5 vorticity dataset");
+    requireSuccess(properties.close(), "cannot close HDF5 dataset properties");
+    requireSuccess(space.close(), "cannot close HDF5 vorticity space");
+    requireSuccess(H5Fflush(file.get(), H5F_SCOPE_GLOBAL), "cannot flush HDF5 field file");
+    requireSuccess(file.close(), "cannot close HDF5 field file");
 #else
     (void)path;
     (void)parameters;

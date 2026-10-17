@@ -196,6 +196,12 @@ if(BUILD_TESTING)
   configure_host_target(ns2d_runtime_guard_tests)
   add_test(NAME runtime_guards COMMAND ns2d_runtime_guard_tests)
 
+  if(TARGET ns2d_hdf5_export)
+    add_executable(ns2d_hdf5_guard_tests tests/hdf5_guards.cpp)
+    configure_host_target(ns2d_hdf5_guard_tests)
+    add_test(NAME hdf5_metadata_guards COMMAND ns2d_hdf5_guard_tests)
+  endif()
+
   set(NS2D_SMOKE_DIR "${CMAKE_CURRENT_BINARY_DIR}/smoke")
   file(MAKE_DIRECTORY "${NS2D_SMOKE_DIR}")
   configure_file(tests/smoke.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/smoke.cmake" @ONLY)

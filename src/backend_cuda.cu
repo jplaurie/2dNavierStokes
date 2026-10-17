@@ -515,7 +515,8 @@ class CudaBackend final : public NonlinearBackend {
 } // namespace
 
 void backendInitialize(int &, char **&) { cudaCheck(cudaFree(nullptr), "initialize CUDA"); }
-void backendFinalize() { saveFftwWisdom(); }
+void backendSaveWisdom() { saveFftwWisdom(); }
+void backendFinalize() noexcept {}
 void backendAbort(int) {}
 void backendBarrier() { cudaCheck(cudaDeviceSynchronize(), "synchronize CUDA device"); }
 bool backendIsRoot() { return true; }

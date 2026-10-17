@@ -14,7 +14,9 @@ using SpectralField = std::vector<Complex>;
 
 class NonlinearBackend {
   public:
-    enum class NoiseLayout { fullField, forcedModes };
+    // rootForcedModes supplies compact increments on rank zero only; the
+    // distributed backend sends each rank the modes it owns.
+    enum class NoiseLayout { fullField, forcedModes, rootForcedModes };
 
     virtual ~NonlinearBackend() = default;
     virtual void evaluate(const SpectralField &vorticity, SpectralField &result) = 0;
@@ -31,7 +33,10 @@ class NonlinearBackend {
 };
 
 void backendInitialize(int &argc, char **&argv);
-void backendFinalize();
+// Save plans before cleanup so an I/O error can be reported without throwing
+// from finalization or retrying the failed save in an exception handler.
+void backendSaveWisdom();
+void backendFinalize() noexcept;
 void backendAbort(int exitCode);
 void backendBarrier();
 [[nodiscard]] bool backendIsRoot();

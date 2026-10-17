@@ -27,6 +27,41 @@ def numbers(path):
     return [float(value) for value in path.read_text().split()]
 
 
+def check_write_failure(cpu, exporter, root):
+    """A buffered HDF5 failure must never commit a truncated snapshot."""
+    try:
+        import resource
+        import signal
+    except ImportError:
+        print("HDF5 file-size-limit check skipped (POSIX resource limits unavailable)")
+        return
+    folder = root / "write_failure"
+    folder.mkdir()
+    params = folder / "run.params"
+    params.write_text(
+        "nx 32\nny 32\ntimeStep .01\nnumberOfSteps 1\noutputIntervalSteps 1\n"
+        "forcingEnabled false\nthreadCount 1\nfieldOutputFormat hdf5\n"
+        f"dataDirectory {folder / 'data'}\noutputDirectory {folder / 'output'}\n"
+    )
+
+    def limit_file_size():
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (9216, 9216))
+
+    metadata = folder / "data/restart_state.txt"
+    for frame in (0, 2):
+        previous = metadata.read_bytes() if metadata.exists() else None
+        failed = subprocess.run([cpu, str(params)], capture_output=True, text=True,
+                                preexec_fn=limit_file_size)
+        assert failed.returncode == 1 and "HDF5" in failed.stderr, failed.stdout + failed.stderr
+        assert (metadata.read_bytes() if metadata.exists() else None) == previous
+        assert not (folder / f"data/vorticity_{frame:08d}.h5").exists()
+        assert (folder / "data/output_transaction.txt").exists()
+        run([cpu, params])  # Roll back the failed frame and retry without the limit.
+        run([exporter, folder / f"data/vorticity_{frame:08d}.h5", folder / "recovered.dat"])
+        assert not (folder / "data/output_transaction.txt").exists()
+
+
 def check_python_reader(hdf5_field, text_field):
     """Exercise the optional plotting reader when its Python stack is installed."""
     try:
@@ -62,6 +97,7 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="ns2d-hdf5-") as temporary:
         root = Path(temporary)
+        check_write_failure(args.cpu, args.exporter, root)
         initial = root / "initial.dat"
         with initial.open("w") as stream:
             for y in range(8):

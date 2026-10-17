@@ -197,6 +197,9 @@ if(BUILD_TESTING)
   add_test(NAME runtime_guards COMMAND ns2d_runtime_guard_tests)
 
   if(TARGET ns2d_hdf5_export)
+    add_executable(ns2d_hdf5_failure_cpu src/main.cpp src/backend_cpu.cpp)
+    configure_host_target(ns2d_hdf5_failure_cpu)
+    target_compile_definitions(ns2d_hdf5_failure_cpu PRIVATE NS2D_HDF5_FAILURE_TEST=1)
     add_executable(ns2d_hdf5_guard_tests tests/hdf5_guards.cpp)
     configure_host_target(ns2d_hdf5_guard_tests)
     add_test(NAME hdf5_metadata_guards COMMAND ns2d_hdf5_guard_tests)
@@ -217,11 +220,38 @@ if(BUILD_TESTING)
       add_test(NAME hdf5_output COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/hdf5_output.py
         --cpu $<TARGET_FILE:navier_stokes_cpu>
+        --failure-cpu $<TARGET_FILE:ns2d_hdf5_failure_cpu>
         --exporter $<TARGET_FILE:ns2d_hdf5_export>)
     endif()
     if(NS2D_BACKEND_TESTS)
       foreach(backend IN ITEMS mpi cuda cuda_mixed)
         if(TARGET navier_stokes_${backend})
+          set(numerics_target ns2d_numerics_tests_${backend})
+          if(backend STREQUAL "mpi")
+            add_executable(${numerics_target} tests/numerics.cpp src/backend_mpi.cpp)
+            target_include_directories(${numerics_target} PRIVATE ${FFTW_MPI_INCLUDE_DIR})
+            target_link_libraries(${numerics_target} PRIVATE MPI::MPI_CXX ${FFTW_MPI_LIBRARY})
+            configure_host_target(${numerics_target})
+            add_test(NAME nonlinear_convolution_${backend} COMMAND ${MPIEXEC_EXECUTABLE}
+              ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:${numerics_target}> ${MPIEXEC_POSTFLAGS})
+          else()
+            add_executable(${numerics_target} tests/numerics.cpp src/backend_cuda.cu)
+            target_link_libraries(${numerics_target} PRIVATE ns2d_common CUDA::cudart CUDA::cufft)
+            set_target_properties(${numerics_target}
+              PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
+            if(NOT NS2D_CUDA_ARCHITECTURES STREQUAL "")
+              set_target_properties(${numerics_target}
+                PROPERTIES CUDA_ARCHITECTURES "${NS2D_CUDA_ARCHITECTURES}")
+            endif()
+            if(backend STREQUAL "cuda_mixed")
+              target_compile_definitions(${numerics_target}
+                PRIVATE NS2D_CUDA_MIXED=1 NS2D_TEST_MIXED=1)
+            endif()
+            add_test(NAME nonlinear_convolution_${backend} COMMAND ${numerics_target})
+          endif()
+          set_tests_properties(nonlinear_convolution_${backend}
+            PROPERTIES LABELS "backend" TIMEOUT 120)
           set(launcher)
           if(backend STREQUAL "mpi")
             list(APPEND launcher --mpiexec ${MPIEXEC_EXECUTABLE}

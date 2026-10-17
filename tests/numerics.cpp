@@ -10,6 +10,74 @@
 #include <vector>
 
 namespace {
+#ifdef NS2D_TEST_MIXED
+constexpr double nonlinearTolerance = 2.0e-7;
+#else
+constexpr double nonlinearTolerance = 2.0e-12;
+#endif
+
+// Sum the unaliased Fourier convolution without any physical-space grid or
+// padded-grid indexing. This independently checks that 3/2 padding implements
+// the Galerkin Jacobian, including interactions near the retained boundary.
+SpectralField directConvolution(const Parameters &p, const SpectralField &w) {
+    const long halfX = static_cast<long>(p.nx / 2);
+    const long halfY = static_cast<long>(p.ny / 2);
+    const auto coefficient = [&](long x, long y) {
+        if (x <= -halfX || x >= halfX || y <= -halfY || y >= halfY)
+            return Complex{};
+        if (x < 0) {
+            x = -x;
+            y = -y;
+            const auto row = static_cast<std::size_t>(y < 0 ? y + static_cast<long>(p.ny) : y);
+            return std::conj(w[row * p.nxf() + static_cast<std::size_t>(x)]);
+        }
+        const auto row = static_cast<std::size_t>(y < 0 ? y + static_cast<long>(p.ny) : y);
+        return w[row * p.nxf() + static_cast<std::size_t>(x)];
+    };
+    SpectralField result(p.spectralSize());
+    for (std::size_t y = 0; y < p.ny; ++y) {
+        const long ky = signedWave(y, p.ny);
+        if (y == p.ny / 2)
+            continue;
+        for (long kx = 0; kx < halfX; ++kx) {
+            if (kx == 0 && ky == 0)
+                continue;
+            Complex sum{};
+            for (long py = 1 - halfY; py < halfY; ++py) {
+                for (long px = 1 - halfX; px < halfX; ++px) {
+                    const long qx = kx - px, qy = ky - py;
+                    if (qx <= -halfX || qx >= halfX || qy <= -halfY || qy >= halfY ||
+                        (qx == 0 && qy == 0))
+                        continue;
+                    const double ax = static_cast<double>(px) / p.aspectRatio;
+                    const double ay = static_cast<double>(py);
+                    const double bx = static_cast<double>(qx) / p.aspectRatio;
+                    const double by = static_cast<double>(qy);
+                    sum += (ax * by - ay * bx) / (bx * bx + by * by) *
+                           coefficient(px, py) * coefficient(qx, qy);
+                }
+            }
+            result[y * p.nxf() + static_cast<std::size_t>(kx)] = sum;
+        }
+    }
+    return result;
+}
+
+void compareNonlinear(const SpectralField &actual, const SpectralField &expected) {
+    if (actual.size() != expected.size())
+        throw std::runtime_error("nonlinear field size mismatch");
+    double maxError = 0.0, scale = 0.0;
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        if (!std::isfinite(actual[i].real()) || !std::isfinite(actual[i].imag()))
+            throw std::runtime_error("non-finite nonlinear coefficient");
+        maxError = std::max(maxError, std::abs(actual[i] - expected[i]));
+        scale = std::max(scale, std::abs(expected[i]));
+    }
+    if (maxError > nonlinearTolerance * std::max(1.0, scale))
+        throw std::runtime_error("dealiased nonlinear evaluator disagrees with reference: " +
+                                 std::to_string(maxError));
+}
+
 Complex factor(std::size_t component, double kx, double ky) {
     const double k2 = kx * kx + ky * ky;
     const Complex imaginary(0.0, 1.0);
@@ -109,7 +177,7 @@ void checkInvariantTransfer(const Parameters &p, const SpectralField &w,
             }
         }
     }
-    constexpr double tolerance = 5.0e-12;
+    constexpr double tolerance = 2.5 * nonlinearTolerance;
     if (std::abs(energyTransfer) > tolerance * std::max(1.0, energyMagnitude))
         throw std::runtime_error("nonlinear term does not conserve energy: " +
                                  std::to_string(energyTransfer));
@@ -155,23 +223,42 @@ void runCase(std::size_t nx, std::size_t ny, double aspectRatio, bool betaPlane)
                                  std::to_string(roundTripError));
 
     const SpectralField expected = directNonlinear(p, w);
+    compareNonlinear(expected, directConvolution(p, w));
     SpectralField actual;
     {
         auto backend = makeBackend(p);
         backend->evaluate(w, actual);
     }
-    double maxError = 0.0;
-    double scale = 0.0;
-    for (std::size_t i = 0; i < actual.size(); ++i) {
-        if (!std::isfinite(actual[i].real()) || !std::isfinite(actual[i].imag()))
-            throw std::runtime_error("non-finite nonlinear coefficient");
-        maxError = std::max(maxError, std::abs(actual[i] - expected[i]));
-        scale = std::max(scale, std::abs(expected[i]));
-    }
-    if (maxError > 2.0e-12 * std::max(1.0, scale))
-        throw std::runtime_error("dealiased nonlinear evaluator disagrees with direct DFT: " +
-                                 std::to_string(maxError));
+    compareNonlinear(actual, expected);
     checkInvariantTransfer(p, w, actual);
+}
+
+void runDenseCase(std::size_t nx, std::size_t ny, double aspectRatio) {
+    Parameters p;
+    p.nx = nx;
+    p.ny = ny;
+    p.aspectRatio = aspectRatio;
+    p.threadCount = 1;
+    p.forcingEnabled = false;
+    // Exercise the scratch-buffer overwrites performed by FFTW's planner too.
+    p.fftwPlanning = FftwPlanning::measure;
+    validateParameters(p);
+    SpectralField w(p.spectralSize());
+    for (std::size_t i = 0; i < w.size(); ++i)
+        w[i] = .1 * Complex(std::cos(.37 * i), std::sin(.19 * i));
+    enforceRealityConstraints(w, p);
+    const auto expected = directConvolution(p, w);
+    auto backend = makeBackend(p);
+    SpectralField actual;
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        backend->evaluate(w, actual);
+        compareNonlinear(actual, expected);
+        checkInvariantTransfer(p, w, actual);
+    }
+    // A later zero input must not retain any of the preceding spectrum.
+    std::fill(w.begin(), w.end(), Complex{});
+    backend->evaluate(w, actual);
+    compareNonlinear(actual, w);
 }
 } // namespace
 
@@ -181,6 +268,10 @@ int main(int argc, char **argv) {
         runCase(8, 8, 1.0, false);
         runCase(8, 12, 2.0, true);
         runCase(12, 8, 0.6, false);
+        runDenseCase(4, 4, 1.0);
+        runDenseCase(8, 8, 1.0);
+        runDenseCase(8, 12, 2.0);
+        runDenseCase(12, 8, 0.6);
         backendFinalize();
         return 0;
     } catch (const std::exception &error) {

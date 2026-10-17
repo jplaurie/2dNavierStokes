@@ -9,10 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install FFTW and HDF5
-        run: sudo apt-get update && sudo apt-get install -y libfftw3-dev libhdf5-dev
+      - name: Install validation dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfftw3-dev libhdf5-dev python3-numpy python3-matplotlib python3-h5py
       - name: Configure
-        run: cmake -S . -B build -DNS2D_MPI=OFF -DNS2D_CUDA=OFF -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DNS2D_MPI=OFF -DNS2D_CUDA=OFF -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/usr/bin/python3
       - name: Build
         run: cmake --build build --parallel 2
       - name: Test

@@ -194,6 +194,9 @@ void Solver::buildIntegrationCoefficients() {
 }
 
 void Solver::buildForcing() {
+    // Keep squared amplitudes and normalization factors out of FP64: either
+    // can overflow/underflow even when the final normalized forcing is finite.
+    long double energyInjection = 0.0L, enstrophyInjection = 0.0L;
     const long singleMode = parameters_.forcingProfile == ForcingProfile::singleMode
                                 ? static_cast<long>(parameters_.forcingWavenumber)
                                 : 0;
@@ -208,12 +211,15 @@ void Solver::buildForcing() {
             if (parameters_.forcingProfile == ForcingProfile::annulus && k > 0.0 &&
                 std::abs(k - parameters_.forcingWavenumber) < parameters_.forcingWidth)
                 amplitude = parameters_.forcingAmplitude;
-            else if (parameters_.forcingProfile == ForcingProfile::exponential && k > 0.0) {
+            else if (parameters_.forcingProfile == ForcingProfile::exponential && k > 0.0 &&
+                     parameters_.forcingAmplitude > 0.0) {
                 const double logRatio =
-                    parameters_.forcingShapeOrder * std::log(k / parameters_.forcingWavenumber);
+                    parameters_.forcingShapeOrder *
+                    (std::log(k) - std::log(parameters_.forcingWavenumber));
                 if (std::isfinite(logRatio) && logRatio <= maximumLog) {
                     const double ratio = std::exp(logRatio);
-                    amplitude = parameters_.forcingAmplitude * std::exp(logRatio - ratio);
+                    amplitude =
+                        std::exp(std::log(parameters_.forcingAmplitude) + logRatio - ratio);
                 }
             } else if (parameters_.forcingProfile == ForcingProfile::singleMode &&
                        static_cast<long>(x) == singleMode && std::abs(kyIndex) == singleMode)
@@ -227,8 +233,10 @@ void Solver::buildForcing() {
             if (amplitude != 0.0 && k > 0.0) {
                 forcedIndices_.push_back(spectralIndex(x, y, parameters_.nxf()));
                 const double halfFactor = (x == 0 || x == parameters_.nx / 2) ? 0.5 : 1.0;
-                enstrophyInjectionCoefficient_ += halfFactor * amplitude * amplitude;
-                energyInjectionCoefficient_ += halfFactor * amplitude * amplitude / (k * k);
+                const long double power = halfFactor * static_cast<long double>(amplitude) *
+                                          amplitude;
+                enstrophyInjection += power;
+                energyInjection += power / (static_cast<long double>(k) * k);
                 forcedModeCount_ += static_cast<std::size_t>(2.0 * halfFactor);
             }
         }
@@ -236,26 +244,51 @@ void Solver::buildForcing() {
     if (forcedModeCount_ == 0)
         throw std::runtime_error(
             "forcingEnabled is true, but the selected profile contains no modes");
-    if (!std::isfinite(energyInjectionCoefficient_) ||
-        !std::isfinite(enstrophyInjectionCoefficient_))
-        throw std::runtime_error("forcing amplitude produces non-finite injection coefficients");
     if (parameters_.targetEnergyInjectionRate > 0.0) {
-        if (energyInjectionCoefficient_ == 0.0)
+        if (energyInjection == 0.0L)
             throw std::runtime_error("cannot normalize an empty forcing spectrum");
-        const double scale = std::sqrt(parameters_.targetEnergyInjectionRate) /
-                             std::sqrt(energyInjectionCoefficient_);
-        if (!(scale > 0.0) || !std::isfinite(scale))
+        const long double scale = std::sqrt(static_cast<long double>(
+                                               parameters_.targetEnergyInjectionRate)) /
+                                  std::sqrt(energyInjection);
+        if (!(scale > 0.0L) || !std::isfinite(scale))
             throw std::runtime_error(
                 "targetEnergyInjectionRate cannot be represented with this forcing "
                 "spectrum");
-        forEachIndex(forcingAmplitude_.size(),
-                     [&](std::size_t index) { forcingAmplitude_[index] *= scale; });
-        enstrophyInjectionCoefficient_ *= scale * scale;
-        if (!std::isfinite(enstrophyInjectionCoefficient_))
-            throw std::runtime_error(
-                "normalized forcing produces a non-finite enstrophy coefficient");
-        energyInjectionCoefficient_ = parameters_.targetEnergyInjectionRate;
+        forEachIndex(forcingAmplitude_.size(), [&](std::size_t index) {
+            const long double amplitude = forcingAmplitude_[index] * scale;
+            forcingAmplitude_[index] =
+                std::abs(amplitude) > std::numeric_limits<double>::max()
+                    ? std::numeric_limits<double>::infinity()
+                    : static_cast<double>(amplitude);
+        });
+        // Recompute from the actual stored amplitudes so the summary never
+        // reports a target rate that the discretized forcing cannot represent.
+        energyInjection = enstrophyInjection = 0.0L;
+        for (const auto index : forcedIndices_) {
+            const double k = std::hypot(waveNumberX(parameters_, index % parameters_.nxf()),
+                                        waveNumberY(parameters_, index / parameters_.nxf()));
+            const double halfFactor = index % parameters_.nxf() == 0 ? 0.5 : 1.0;
+            const long double amplitude = forcingAmplitude_[index];
+            const long double power = halfFactor * amplitude * amplitude;
+            enstrophyInjection += power;
+            energyInjection += power / (static_cast<long double>(k) * k);
+        }
     }
+    if (!std::isfinite(energyInjection) || !std::isfinite(enstrophyInjection) ||
+        energyInjection > std::numeric_limits<double>::max() ||
+        enstrophyInjection > std::numeric_limits<double>::max())
+        throw std::runtime_error(
+            "forcing injection coefficients overflow or underflow; adjust the amplitude or "
+            "targetEnergyInjectionRate");
+    energyInjectionCoefficient_ = static_cast<double>(energyInjection);
+    enstrophyInjectionCoefficient_ = static_cast<double>(enstrophyInjection);
+    if (parameters_.usesStochasticForcing() &&
+        (!(energyInjectionCoefficient_ > 0.0) || !(enstrophyInjectionCoefficient_ > 0.0) ||
+         !std::isfinite(energyInjectionCoefficient_) ||
+         !std::isfinite(enstrophyInjectionCoefficient_)))
+        throw std::runtime_error(
+            "forcing injection coefficients overflow or underflow; adjust the amplitude or "
+            "targetEnergyInjectionRate");
     if (backendIsRoot()) {
         std::cout << "number of forced modes = " << forcedModeCount_;
         if (parameters_.forcingProfile != ForcingProfile::singleMode)

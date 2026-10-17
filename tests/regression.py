@@ -125,6 +125,67 @@ def numerics(root, cpu):
                         timeStep=1e308, integrator="etd4")
     run(cpu, folder, error="time integration coefficients contains a non-finite coefficient")
 
+    # Normalization must depend on the requested rate, even when squaring the
+    # original amplitude or the normalization factor over/underflows in FP64.
+    normalized_states = {}
+    for amplitude in [1e-200, 1e-160, 1, 1e150, 1e200]:
+        for target in [1, 1e-100]:
+            folder = parameters(root / f"normalized_{amplitude}_{target}",
+                                forcingEnabled="true", forcingWavenumber=1,
+                                forcingWidth=.01, forcingAmplitude=amplitude,
+                                targetEnergyInjectionRate=target, viscosity=0)
+            run(cpu, folder)
+            with (folder / "output/forcing_summary.csv").open() as stream:
+                summary = next(csv.DictReader(stream))
+            for key in ["energy_injection_coefficient", "enstrophy_injection_coefficient"]:
+                require(abs(float(summary[key]) / target - 1) < 1e-13,
+                        f"Incorrect normalized {key} for amplitude {amplitude}")
+            actual = checkpoint(folder)
+            reference = normalized_states.setdefault(target, actual)
+            require(difference(actual, reference) < 1e-13 * math.sqrt(target),
+                    "Amplitude normalization changed the stochastic trajectory")
+    for amplitude in [1e-200, 1e200]:
+        folder = parameters(root / f"unrepresentable_forcing_{amplitude}",
+                            forcingEnabled="true", forcingWavenumber=1,
+                            forcingWidth=.01, forcingAmplitude=amplitude)
+        run(cpu, folder, error="forcing injection coefficients overflow or underflow")
+
+    for center, order, amplitude in [(1e-308, .001, 1), (1e100, 4.5, 1e300)]:
+        folder = parameters(root / f"exponential_extreme_{center}", forcingEnabled="true",
+                            forcingProfile="exponential", forcingWavenumber=center,
+                            forcingShapeOrder=order, forcingAmplitude=amplitude)
+        run(cpu, folder)
+        with (folder / "output/forcing_spectrum.csv").open() as stream:
+            for row in csv.DictReader(stream):
+                kx, ky = float(row["kx"]), float(row["ky"])
+                if kx == 8 or abs(ky) == 8 or (kx == 0 and ky == 0):
+                    continue
+                log_ratio = order * (math.log(math.hypot(kx, ky)) - math.log(center))
+                expected = math.exp(math.log(amplitude) + log_ratio - math.exp(log_ratio))
+                require(abs(float(row["amplitude"]) / expected - 1) < 1e-11,
+                        "Exponential forcing lost a representable mode through an intermediate")
+
+    # The GP diagnostics needed a nonlinear-energy correction. Both NS
+    # invariants are quadratic; verify their separate damping budgets exactly.
+    for aspect in [1, 2, .6]:
+        folder = parameters(root / f"damping_budget_{aspect}", aspectRatio=aspect,
+                            initialConditionFile=wave, viscosity=.1, viscosityOrder=2,
+                            linearDrag=.3, dragOrder=-1, timeStep=.7)
+        run(cpu, folder)
+        with (folder / "output/diagnostics.csv").open() as stream:
+            row = next(csv.DictReader(stream))
+        k2 = 1 + 1 / aspect**2
+        enstrophy = .25 * math.exp(-2 * .7 * (.1 * k2**2 + .3 / k2))
+        energy = enstrophy / k2
+        expected = dict(energy=energy, enstrophy=enstrophy,
+                        energy_dissipation_viscosity=2 * .1 * k2**2 * energy,
+                        enstrophy_dissipation_viscosity=2 * .1 * k2**2 * enstrophy,
+                        energy_dissipation_drag=2 * .3 / k2 * energy,
+                        enstrophy_dissipation_drag=2 * .3 / k2 * enstrophy)
+        for key, value in expected.items():
+            require(abs(float(row[key]) / value - 1) < 1e-11,
+                    f"Incorrect {key} in the analytic damping budget")
+
 
 def output(root, cpu):
     bad_field = field(root / "trailing.dat", 16, 16, lambda x, y: math.cos(x+y))
@@ -226,7 +287,8 @@ def output(root, cpu):
 
 def backend(root, cpu, candidate, tolerance):
     initial = field(root / "initial.dat", 32, 48,
-                    lambda x, y: math.sin(x) + .4*math.cos(2*y) + .2*math.sin(3*x-y))
+                    lambda x, y: math.sin(x) + .4*math.cos(2*y) + .2*math.sin(3*x-y)
+                                  + .15*math.cos(15*x+23*y) + .1*math.sin(14*x-23*y))
     largest_difference = 0.0
     # Only the ky=0 slab owns a forced mode. Other MPI ranks must participate
     # in the noise scatter with a zero receive count, including after restart.

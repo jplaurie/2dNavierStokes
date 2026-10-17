@@ -191,8 +191,12 @@ the CUDA executables when no CUDA compiler is found. Useful options are:
 ```
 
 `NS2D_BACKEND_TESTS` adds MPI and CUDA comparisons when those executables can
-run locally. The standard suite checks numerical kernels, outputs, restart
-recovery, and parameter handling. Convenience targets are `make cpu`,
+run locally, including direct Fourier-convolution checks on each backend. The
+standard suite checks numerical kernels, outputs, restart recovery, and
+parameter handling. Its HDF5 write-failure check uses a separate test executable
+to avoid HDF5 1.10's exit-time cleanup crash under persistent I/O errors; snapshot
+recovery and successful writes use the production executable.
+Convenience targets are `make cpu`,
 `make cpu-serial`, `make mpi`, `make cuda`, `make cuda-mixed`,
 `make hdf5-export`, `make benchmark-backends`, and `make test`; set `BUILD_DIR`
 if needed. CPU validation also runs on every push and pull request through the

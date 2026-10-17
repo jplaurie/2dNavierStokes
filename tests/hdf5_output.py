@@ -27,7 +27,7 @@ def numbers(path):
     return [float(value) for value in path.read_text().split()]
 
 
-def check_write_failure(cpu, exporter, root):
+def check_write_failure(cpu, failure_cpu, exporter, root):
     """A buffered HDF5 failure must never commit a truncated snapshot."""
     try:
         import resource
@@ -47,13 +47,20 @@ def check_write_failure(cpu, exporter, root):
     def limit_file_size():
         signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
         resource.setrlimit(resource.RLIMIT_FSIZE, (9216, 9216))
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
     metadata = folder / "data/restart_state.txt"
     for frame in (0, 2):
         previous = metadata.read_bytes() if metadata.exists() else None
-        failed = subprocess.run([cpu, str(params)], capture_output=True, text=True,
-                                preexec_fn=limit_file_size)
-        assert failed.returncode == 1 and "HDF5" in failed.stderr, failed.stdout + failed.stderr
+        # This build disables HDF5's atexit retry before any HDF5 calls. RAII
+        # still runs, but HDF5 1.10 cannot crash later while retrying the failure.
+        failed = subprocess.run([failure_cpu, str(params)], capture_output=True, text=True,
+                                preexec_fn=limit_file_size, timeout=30)
+        write_errors = ("cannot write HDF5 vorticity dataset",
+                        "cannot close HDF5 vorticity dataset",
+                        "cannot flush HDF5 field file", "cannot close HDF5 field file")
+        assert failed.returncode == 1 and any(error in failed.stderr for error in write_errors), (
+            f"HDF5 write failure returned {failed.returncode}\n{failed.stdout}\n{failed.stderr}")
         assert (metadata.read_bytes() if metadata.exists() else None) == previous
         assert not (folder / f"data/vorticity_{frame:08d}.h5").exists()
         assert (folder / "data/output_transaction.txt").exists()
@@ -93,11 +100,12 @@ def check_python_reader(hdf5_field, text_field):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cpu", required=True)
+    parser.add_argument("--failure-cpu", required=True)
     parser.add_argument("--exporter", required=True)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="ns2d-hdf5-") as temporary:
         root = Path(temporary)
-        check_write_failure(args.cpu, args.exporter, root)
+        check_write_failure(args.cpu, args.failure_cpu, args.exporter, root)
         initial = root / "initial.dat"
         with initial.open("w") as stream:
             for y in range(8):

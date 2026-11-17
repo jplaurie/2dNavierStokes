@@ -1,0 +1,82 @@
+name: CUDA tests (simulated H100)
+
+# Optional, non-required check. The hosted runners have no GPU, so this builds
+# the cuFFT backend and runs its ctest integration tests (NS2D_BACKEND_TESTS)
+# on a simulated NVIDIA H100 (https://github.com/pantheongpu/pantheonsim).
+# A simulator has no timing model and cannot reproduce hardware-specific
+# behaviour, so it complements real-GPU testing and does not replace it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: gpu-sim-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cuda-sim:
+    name: CUDA 13.0, simulated H100
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfftw3-dev python3
+
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@a1b9d4237411f9b2b0e0bb895b4d83377f336a7b # v0.1.9
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+          library-path: "false"
+
+      # 90-virtual embeds PTX only, which the simulator runs. The simulator
+      # needs a shared CUDA runtime.
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNS2D_MPI=OFF -DNS2D_CUDA=ON -DNS2D_HDF5=OFF \
+            -DNS2D_BACKEND_TESTS=ON \
+            -DNS2D_CUDA_ARCHITECTURES=90-virtual \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared \
+            -DPython3_EXECUTABLE=/usr/bin/python3
+
+      - name: Build
+        run: |
+          vgpu run --preload cmake --build build -j3 --target \
+            navier_stokes_cpu navier_stokes_cuda navier_stokes_cuda_mixed \
+            ns2d_numerics_tests_cuda ns2d_numerics_tests_cuda_mixed
+
+      # The four CUDA tests must be registered, otherwise ctest would simply
+      # run nothing for the filter. The numerics tests call the cuFFT backend
+      # directly and must report the virtual GPU. The regression tests run the
+      # CUDA solver against the CPU solver (tolerance 2e-12, 2e-7 for the
+      # mixed-precision build), so a CPU-only or skipped run cannot pass.
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build -N -R '_cuda' | tee list.log
+          grep -q "Total Tests: 4" list.log
+          vgpu run ctest --test-dir build -R '_cuda' -V --output-on-failure \
+            --no-tests=error | tee ctest.log
+          grep -q "100% tests passed, 0 tests failed out of 4" ctest.log
+          grep -q "virtual GPU platform initialized" ctest.log
+          if grep -Eqi "\*\*\*(Failed|Skipped|Not Run)|CUDA error|Disabled" ctest.log; then
+            echo "::error::a CUDA test failed or was skipped"
+            exit 1
+          fi

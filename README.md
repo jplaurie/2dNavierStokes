@@ -20,8 +20,8 @@ and output format:
 When HDF5 is available, `ns2d_hdf5_export` converts compressed vorticity
 snapshots back to solver text fields or directly plottable gnuplot tables.
 
-The current solver is self-contained; the original source trees are kept in
-[`archived/`](archived/) for reference.
+The current solver is self-contained; the original source trees are available
+in the Git history for reference.
 
 ## Equation, forcing, and dissipation
 
